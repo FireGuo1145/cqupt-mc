@@ -1,5 +1,7 @@
 auth.db
 auth.db-*
+.env
+!.env.example
 data/
 web/mc-skin/node_modules/
 web/mc-skin/.yarn/

@@ -1,20 +1,25 @@
 package main
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -48,6 +53,7 @@ type yggLogin struct {
 }
 
 func main() {
+	loadDotEnv(".env")
 	driver := os.Getenv("DB_DRIVER")
 	if driver == "" {
 		driver = "sqlite"
@@ -101,6 +107,31 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, withCORS(mux)))
 }
 
+// loadDotEnv provides a small dependency-free .env loader. Existing process
+// environment variables always take precedence over values from the file.
+func loadDotEnv(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		value = strings.Trim(value, "\"'")
+		_ = os.Setenv(key, value)
+	}
+}
+
 func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", 405)
@@ -135,6 +166,11 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	status, err := probe(in.StudentID, in.StudentPassword, in.Captcha)
 	if err != nil {
 		jsonError(w, "统一认证服务暂时不可用", 502)
+		return
+	}
+	if status == "captcha-required" && in.Captcha == "" {
+		w.WriteHeader(http.StatusPreconditionRequired)
+		jsonOK(w, map[string]any{"error": "统一认证需要验证码", "code": "captcha-required"})
 		return
 	}
 	if status != "credentials-correct" && status != "authenticated" {
@@ -176,22 +212,123 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func probe(user, pass, captcha string) (string, error) {
-	// probe.mjs is the source of truth for the university CAS flow. The optional
-	// CAPTCHA value is passed through for future probe implementations.
-	_ = captcha
-	cmd := exec.Command("node", "-e", `import('./probe.mjs').then(async m=>{let r=await m.runProbe({username:process.env.PUSER,password:process.env.PPASS,captchaCode:process.env.PCAPTCHA}); console.log(JSON.stringify(r))}).catch(e=>{console.error(e.message);process.exit(1)})`)
-	cmd.Env = append(os.Environ(), "PUSER="+user, "PPASS="+pass, "PCAPTCHA="+captcha)
-	out, err := cmd.Output()
+	const origin = "https://ids.cqupt.edu.cn"
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	loginURL := origin + "/authserver/login"
+	resp, err := client.Get(loginURL)
 	if err != nil {
 		return "", err
 	}
-	var result struct {
-		Status string `json:"status"`
+	defer resp.Body.Close()
+	page, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result) != nil {
-		return "", errors.New("invalid probe output")
+	salt := matchInput(string(page), "pwdEncryptSalt")
+	execution := matchInput(string(page), "execution")
+	eventID := matchInput(string(page), "_eventId")
+	if salt == "" || execution == "" || eventID == "" {
+		return "", fmt.Errorf("CAS login form fields missing")
 	}
-	return result.Status, nil
+	check, err := client.Get(origin + "/authserver/checkNeedCaptcha.htl?username=" + url.QueryEscape(user))
+	if err != nil {
+		return "", err
+	}
+	var need struct {
+		IsNeed bool `json:"isNeed"`
+	}
+	err = json.NewDecoder(check.Body).Decode(&need)
+	check.Body.Close()
+	if err != nil {
+		return "", err
+	}
+	if need.IsNeed && strings.TrimSpace(captcha) == "" {
+		return "captcha-required", nil
+	}
+	encrypted, err := encryptCASPassword(pass, salt)
+	if err != nil {
+		return "", err
+	}
+	form := url.Values{"username": {user}, "password": {encrypted}, "_eventId": {eventID}, "execution": {execution}, "cllt": {"userNameLogin"}, "dllt": {"generalLogin"}}
+	if captcha != "" {
+		form.Set("captcha", captcha)
+	}
+	req, _ := http.NewRequest(http.MethodPost, loginURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("Referer", loginURL)
+	resp, err = client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	for hop := 0; hop < 8; hop++ {
+		location := resp.Header.Get("Location")
+		if resp.StatusCode < 300 || resp.StatusCode >= 400 || location == "" {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			resp.Body.Close()
+			finalPath := resp.Request.URL.Path
+			if resp.StatusCode == http.StatusUnauthorized || strings.Contains(string(body), `id="pwdFromId"`) {
+				return "credentials-incorrect", nil
+			}
+			if finalPath == "/personalInfo/personCenter/index.html" {
+				return "credentials-correct", nil
+			}
+			return "login-unconfirmed", nil
+		}
+		resp.Body.Close()
+		next, parseErr := url.Parse(location)
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if !next.IsAbs() {
+			next = resp.Request.URL.ResolveReference(next)
+		}
+		if next.Scheme != "https" || next.Host != "ids.cqupt.edu.cn" {
+			return "login-unconfirmed", nil
+		}
+		resp, err = client.Get(next.String())
+		if err != nil {
+			return "", err
+		}
+	}
+	resp.Body.Close()
+	return "login-unconfirmed", nil
+}
+
+func matchInput(html, id string) string {
+	re := regexp.MustCompile(`(?is)<input[^>]+(?:id|name)=["']` + regexp.QuoteMeta(id) + `["'][^>]*>`)
+	tag := re.FindString(html)
+	v := regexp.MustCompile(`(?i)value=["']([^"']*)["']`).FindStringSubmatch(tag)
+	if len(v) > 1 {
+		return v[1]
+	}
+	return ""
+}
+func encryptCASPassword(password, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if len([]byte(key)) != 16 {
+		return "", fmt.Errorf("invalid CAS encryption key")
+	}
+	random := make([]byte, 80)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	chars := "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
+	prefix := make([]byte, 64)
+	iv := make([]byte, 16)
+	for i := range random {
+		random[i] = chars[int(random[i])%len(chars)]
+	}
+	copy(prefix, random[:64])
+	copy(iv, random[64:])
+	padded := []byte(string(prefix) + password)
+	pad := aes.BlockSize - len(padded)%aes.BlockSize
+	padded = append(padded, bytes.Repeat([]byte{byte(pad)}, pad)...)
+	cipherBlock, _ := aes.NewCipher([]byte(key))
+	out := make([]byte, len(padded))
+	mode := cipher.NewCBCEncrypter(cipherBlock, iv)
+	mode.CryptBlocks(out, padded)
+	return base64.StdEncoding.EncodeToString(out), nil
 }
 
 func hashPassword(password string) (string, error) {
