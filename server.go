@@ -165,7 +165,8 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	}
 	status, err := probe(in.StudentID, in.StudentPassword, in.Captcha)
 	if err != nil {
-		jsonError(w, "统一认证服务暂时不可用", 502)
+		log.Printf("CQUPT probe error: %v", err)
+		jsonError(w, "统一认证服务暂时不可用: "+err.Error(), 502)
 		return
 	}
 	if status == "captcha-required" && in.Captcha == "" {
@@ -225,9 +226,13 @@ func probe(user, pass, captcha string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	salt := matchInput(string(page), "pwdEncryptSalt")
-	execution := matchInput(string(page), "execution")
-	eventID := matchInput(string(page), "_eventId")
+	pageHTML := string(page)
+	fields := parseCASForm(pageHTML)
+	salt := fields["pwdEncryptSalt"]
+	execution := fields["execution"]
+	eventID := fields["_eventId"]
+	cllt := fields["cllt"]
+	dllt := fields["dllt"]
 	if salt == "" || execution == "" || eventID == "" {
 		return "", fmt.Errorf("CAS login form fields missing")
 	}
@@ -250,13 +255,33 @@ func probe(user, pass, captcha string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	form := url.Values{"username": {user}, "password": {encrypted}, "_eventId": {eventID}, "execution": {execution}, "cllt": {"userNameLogin"}, "dllt": {"generalLogin"}}
+	if cllt == "" {
+		cllt = "userNameLogin"
+	}
+	if dllt == "" {
+		dllt = "generalLogin"
+	}
+	form := url.Values{}
+	for key, value := range fields {
+		if key != "pwdEncryptSalt" {
+			form.Set(key, value)
+		}
+	}
+	form.Set("username", user)
+	form.Set("password", encrypted)
+	form.Set("_eventId", eventID)
+	form.Set("execution", execution)
+	form.Set("cllt", cllt)
+	form.Set("dllt", dllt)
 	if captcha != "" {
 		form.Set("captcha", captcha)
 	}
 	req, _ := http.NewRequest(http.MethodPost, loginURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	req.Header.Set("Referer", loginURL)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	resp, err = client.Do(req)
 	if err != nil {
 		return "", err
@@ -267,14 +292,20 @@ func probe(user, pass, captcha string) (string, error) {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 			resp.Body.Close()
 			finalPath := resp.Request.URL.Path
-			if resp.StatusCode == http.StatusUnauthorized || strings.Contains(string(body), `id="pwdFromId"`) {
+			loginPage := strings.Contains(string(body), `id="pwdFromId"`) || strings.Contains(string(body), `name="passwordText"`)
+			log.Printf("CQUPT probe final response: status=%d url=%s loginPage=%t", resp.StatusCode, resp.Request.URL.String(), loginPage)
+			if resp.StatusCode >= 500 {
+				log.Printf("CQUPT probe response body: %s", compactProbeBody(string(body)))
+			}
+			if resp.StatusCode == http.StatusUnauthorized || loginPage {
 				return "credentials-incorrect", nil
 			}
-			if finalPath == "/personalInfo/personCenter/index.html" {
+			if finalPath == "/personalInfo/personCenter/index.html" || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
 				return "credentials-correct", nil
 			}
 			return "login-unconfirmed", nil
 		}
+		log.Printf("CQUPT probe redirect: status=%d from=%s location=%s", resp.StatusCode, resp.Request.URL.String(), location)
 		resp.Body.Close()
 		next, parseErr := url.Parse(location)
 		if parseErr != nil {
@@ -283,16 +314,31 @@ func probe(user, pass, captcha string) (string, error) {
 		if !next.IsAbs() {
 			next = resp.Request.URL.ResolveReference(next)
 		}
-		if next.Scheme != "https" || next.Host != "ids.cqupt.edu.cn" {
+		if next.Scheme != "https" || next.Hostname() != "ids.cqupt.edu.cn" || (next.Port() != "" && next.Port() != "443") {
 			return "login-unconfirmed", nil
 		}
-		resp, err = client.Get(next.String())
+		redirectReq, reqErr := http.NewRequest(http.MethodGet, next.String(), nil)
+		if reqErr != nil {
+			return "", reqErr
+		}
+		redirectReq.Header.Set("Referer", resp.Request.URL.String())
+		redirectReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
+		resp, err = client.Do(redirectReq)
 		if err != nil {
 			return "", err
 		}
 	}
 	resp.Body.Close()
 	return "login-unconfirmed", nil
+}
+
+func compactProbeBody(s string) string {
+	s = regexp.MustCompile(`<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>`).ReplaceAllString(s, " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 600 {
+		return s[:600]
+	}
+	return s
 }
 
 func matchInput(html, id string) string {
@@ -304,6 +350,67 @@ func matchInput(html, id string) string {
 	}
 	return ""
 }
+
+func parseCASForm(html string) map[string]string {
+	result := map[string]string{}
+	form := ""
+	for _, candidate := range regexp.MustCompile(`(?is)<form\b[^>]*>[\s\S]*?</form>`).FindAllString(html, -1) {
+		if regexp.MustCompile(`(?i)\bid\s*=\s*["']pwdFromId["']`).MatchString(candidate) {
+			form = candidate
+			break
+		}
+	}
+	if form == "" {
+		// Some deployments omit the form id while keeping the same named inputs.
+		form = html
+	}
+	inputRE := regexp.MustCompile(`(?is)<input\b[^>]*>`)
+	attrRE := regexp.MustCompile(`(?i)([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+	for _, tag := range inputRE.FindAllString(form, -1) {
+		attrs := map[string]string{}
+		for _, m := range attrRE.FindAllStringSubmatch(tag, -1) {
+			value := m[2]
+			if value == "" {
+				value = m[3]
+			}
+			if value == "" {
+				value = m[4]
+			}
+			attrs[strings.ToLower(m[1])] = value
+		}
+		name := attrs["name"]
+		if name == "" {
+			if attrs["id"] == "pwdEncryptSalt" {
+				result["pwdEncryptSalt"] = attrs["value"]
+			}
+			continue
+		}
+		if strings.EqualFold(attrs["type"], "checkbox") && !regexp.MustCompile(`(?i)\schecked(?:\s|=|/?>)`).MatchString(tag) {
+			continue
+		}
+		result[name] = attrs["value"]
+	}
+	if result["cllt"] == "" {
+		result["cllt"] = "userNameLogin"
+	}
+	if result["dllt"] == "" {
+		result["dllt"] = "generalLogin"
+	}
+	return result
+}
+
+func matchCheckedInput(html, name string) string {
+	re := regexp.MustCompile(`(?is)<input[^>]+name=["']` + regexp.QuoteMeta(name) + `["'][^>]*checked[^>]*>`)
+	tag := re.FindString(html)
+	if tag == "" {
+		return ""
+	}
+	v := regexp.MustCompile(`(?i)value=["']([^"']*)["']`).FindStringSubmatch(tag)
+	if len(v) > 1 {
+		return v[1]
+	}
+	return "on"
+}
 func encryptCASPassword(password, key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if len([]byte(key)) != 16 {
@@ -314,13 +421,14 @@ func encryptCASPassword(password, key string) (string, error) {
 		return "", err
 	}
 	chars := "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
-	prefix := make([]byte, 64)
 	iv := make([]byte, 16)
+	prefix := make([]byte, 64)
 	for i := range random {
 		random[i] = chars[int(random[i])%len(chars)]
 	}
-	copy(prefix, random[:64])
-	copy(iv, random[64:])
+	// probe.mjs consumes the random stream in this order: IV first, prefix second.
+	copy(iv, random[:16])
+	copy(prefix, random[16:])
 	padded := []byte(string(prefix) + password)
 	pad := aes.BlockSize - len(padded)%aes.BlockSize
 	padded = append(padded, bytes.Repeat([]byte{byte(pad)}, pad)...)
