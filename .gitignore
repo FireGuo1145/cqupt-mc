@@ -1,0 +1,7 @@
+auth.db
+auth.db-*
+data/
+web/mc-skin/node_modules/
+web/mc-skin/.yarn/
+web/mc-skin/.pnp.*
+*.exe

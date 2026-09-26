@@ -168,7 +168,7 @@ async function promptHidden(label) {
   });
 }
 
-export async function runProbe({ username, password, serviceUrl, fetchImpl = fetch, captchaPrompt }) {
+export async function runProbe({ username, password, serviceUrl, fetchImpl = fetch, captchaPrompt, captchaCode: suppliedCaptcha = '' }) {
   if (!username || !password) throw new Error('Username and password are required.');
   const service = serviceUrl ? new URL(serviceUrl) : null;
   if (service && service.protocol !== 'https:') throw new Error('CAS service callback must use HTTPS.');
@@ -220,9 +220,9 @@ export async function runProbe({ username, password, serviceUrl, fetchImpl = fet
   const checkResponse = await request(captchaCheck, { headers: { referer: loginUrl.toString() } });
   if (!checkResponse.ok) throw new Error(`Captcha preflight returned HTTP ${checkResponse.status}.`);
   const checkData = await checkResponse.json();
-  let captchaCode = '';
+  let captchaCode = String(suppliedCaptcha || '').trim();
   if (checkData?.isNeed === true) {
-    if (typeof captchaPrompt !== 'function') {
+    if (!captchaCode && typeof captchaPrompt !== 'function') {
       return { status: 'captcha-required', message: 'The identity provider requires a CAPTCHA; no image was fetched and no credentials were submitted.' };
     }
     const captchaUrl = new URL('/authserver/getCaptcha.htl', IDS_ORIGIN);
