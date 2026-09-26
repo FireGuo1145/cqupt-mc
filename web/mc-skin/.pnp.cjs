@@ -48,6 +48,7 @@ const RAW_RUNTIME_STATE =
           ["react", "npm:19.3.0"],\
           ["react-aria-components", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:1.21.1"],\
           ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["react-router-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4"],\
           ["shadcn", "npm:4.21.0"],\
           ["tailwindcss", "npm:4.3.3"],\
           ["tw-animate-css", "npm:1.4.0"],\
@@ -2249,6 +2250,13 @@ const RAW_RUNTIME_STATE =
           ["cookie", "npm:0.7.2"]\
         ],\
         "linkType": "HARD"\
+      }],\
+      ["npm:1.1.1", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/cookie-npm-1.1.1-881103ddeb-10c0.zip/node_modules/cookie/",\
+        "packageDependencies": [\
+          ["cookie", "npm:1.1.1"]\
+        ],\
+        "linkType": "HARD"\
       }]\
     ]],\
     ["cookie-signature", [\
@@ -4163,6 +4171,7 @@ const RAW_RUNTIME_STATE =
           ["react", "npm:19.3.0"],\
           ["react-aria-components", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:1.21.1"],\
           ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["react-router-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4"],\
           ["shadcn", "npm:4.21.0"],\
           ["tailwindcss", "npm:4.3.3"],\
           ["tw-animate-css", "npm:1.4.0"],\
@@ -5044,6 +5053,61 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["react-router", [\
+      ["npm:7.18.4", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/react-router-npm-7.18.4-dff25fa4ee-10c0.zip/node_modules/react-router/",\
+        "packageDependencies": [\
+          ["react-router", "npm:7.18.4"]\
+        ],\
+        "linkType": "SOFT"\
+      }],\
+      ["virtual:aa102467667745f30f706da65bc0ca5140e9b6a4c30a24f08f7e72924226cf64632ecd458a3a1180631d06474fdbb2e5e16a0b761920a4399d12e6b9b984702c#npm:7.18.4", {\
+        "packageLocation": "./.yarn/__virtual__/react-router-virtual-f8972b1586/6/C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/react-router-npm-7.18.4-dff25fa4ee-10c0.zip/node_modules/react-router/",\
+        "packageDependencies": [\
+          ["@types/react", "npm:19.3.0"],\
+          ["@types/react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["cookie", "npm:1.1.1"],\
+          ["react", "npm:19.3.0"],\
+          ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["react-router", "virtual:aa102467667745f30f706da65bc0ca5140e9b6a4c30a24f08f7e72924226cf64632ecd458a3a1180631d06474fdbb2e5e16a0b761920a4399d12e6b9b984702c#npm:7.18.4"],\
+          ["set-cookie-parser", "npm:2.7.2"]\
+        ],\
+        "packagePeers": [\
+          "@types/react-dom",\
+          "@types/react",\
+          "react-dom",\
+          "react"\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["react-router-dom", [\
+      ["npm:7.18.4", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/react-router-dom-npm-7.18.4-488e3d334d-10c0.zip/node_modules/react-router-dom/",\
+        "packageDependencies": [\
+          ["react-router-dom", "npm:7.18.4"]\
+        ],\
+        "linkType": "SOFT"\
+      }],\
+      ["virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4", {\
+        "packageLocation": "./.yarn/__virtual__/react-router-dom-virtual-aa10246766/6/C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/react-router-dom-npm-7.18.4-488e3d334d-10c0.zip/node_modules/react-router-dom/",\
+        "packageDependencies": [\
+          ["@types/react", "npm:19.3.0"],\
+          ["@types/react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["react", "npm:19.3.0"],\
+          ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
+          ["react-router", "virtual:aa102467667745f30f706da65bc0ca5140e9b6a4c30a24f08f7e72924226cf64632ecd458a3a1180631d06474fdbb2e5e16a0b761920a4399d12e6b9b984702c#npm:7.18.4"],\
+          ["react-router-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4"]\
+        ],\
+        "packagePeers": [\
+          "@types/react-dom",\
+          "@types/react",\
+          "react-dom",\
+          "react"\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["react-stately", [\
       ["npm:3.50.0", {\
         "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/react-stately-npm-3.50.0-ce14143a14-10c0.zip/node_modules/react-stately/",\
@@ -5246,6 +5310,15 @@ const RAW_RUNTIME_STATE =
           ["parseurl", "npm:1.3.3"],\
           ["send", "npm:1.2.1"],\
           ["serve-static", "npm:2.2.1"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["set-cookie-parser", [\
+      ["npm:2.7.2", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/set-cookie-parser-npm-2.7.2-e1a4d1221b-10c0.zip/node_modules/set-cookie-parser/",\
+        "packageDependencies": [\
+          ["set-cookie-parser", "npm:2.7.2"]\
         ],\
         "linkType": "HARD"\
       }]\

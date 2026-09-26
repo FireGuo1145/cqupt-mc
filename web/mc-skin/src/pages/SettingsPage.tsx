@@ -1,0 +1,1 @@
+export default function SettingsPage(){return <div className="page"><header><div><p className="eyebrow">ACCOUNT</p><h2>账号设置</h2></div></header><section className="settings-list"><div><span>本站用户名</span><strong>{localStorage.getItem('mc_username')}</strong></div><div><span>登录方式</span><strong>本站账号密码</strong></div><div><span>统一认证账号</span><strong>已验证</strong></div></section></div>}

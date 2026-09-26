@@ -98,7 +98,25 @@ func main() {
 	mux.HandleFunc("/sessionserver/session/minecraft/hasJoined", a.yggHasJoined)
 	mux.HandleFunc("/sessionserver/session/minecraft/profile/", a.yggProfile)
 	static, _ := fs.Sub(frontend, "web/mc-skin/dist")
-	mux.Handle("/", http.FileServer(http.FS(static)))
+	fileServer := http.FileServer(http.FS(static))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// React Router owns application routes. Return the embedded shell for
+		// routes without a physical asset so /login and /dashboard do not 404.
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" || !strings.Contains(path, ".") {
+			if _, err := fs.Stat(static, path); err != nil {
+				data, readErr := fs.ReadFile(static, "index.html")
+				if readErr != nil {
+					http.Error(w, "frontend unavailable", 500)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write(data)
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = ":8080"
