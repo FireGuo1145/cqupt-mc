@@ -90,13 +90,30 @@ func main() {
 	mux.HandleFunc("/api/admin/ban", a.adminBan)
 	mux.HandleFunc("/api/admin/delete", a.adminDelete)
 	mux.HandleFunc("/api/skin", a.skin)
+	mux.HandleFunc("/api/skin/", a.publicSkin)
 	mux.HandleFunc("/authserver/authenticate", a.yggAuthenticate)
+	mux.HandleFunc("/authserver/authenticate/", a.yggAuthenticate)
 	mux.HandleFunc("/authserver/refresh", a.yggRefresh)
+	mux.HandleFunc("/authserver/refresh/", a.yggRefresh)
 	mux.HandleFunc("/authserver/validate", a.yggValidate)
+	mux.HandleFunc("/authserver/validate/", a.yggValidate)
 	mux.HandleFunc("/authserver/invalidate", a.yggInvalidate)
+	mux.HandleFunc("/authserver/invalidate/", a.yggInvalidate)
 	mux.HandleFunc("/sessionserver/session/minecraft/join", a.yggJoin)
 	mux.HandleFunc("/sessionserver/session/minecraft/hasJoined", a.yggHasJoined)
 	mux.HandleFunc("/sessionserver/session/minecraft/profile/", a.yggProfile)
+	mux.HandleFunc("/authlib-injector", a.yggMetadata)
+	mux.HandleFunc("/authlib-injector/", a.yggMetadata)
+	mux.HandleFunc("/api/yggdrasil", a.yggMetadata)
+	mux.HandleFunc("/api/yggdrasil/", a.yggMetadata)
+	mux.HandleFunc("/api/yggdrasil/authserver/authenticate", a.yggAuthenticate)
+	mux.HandleFunc("/api/yggdrasil/authserver/authenticate/", a.yggAuthenticate)
+	mux.HandleFunc("/api/yggdrasil/authserver/refresh", a.yggRefresh)
+	mux.HandleFunc("/api/yggdrasil/authserver/validate", a.yggValidate)
+	mux.HandleFunc("/api/yggdrasil/authserver/invalidate", a.yggInvalidate)
+	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/join", a.yggJoin)
+	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/hasJoined", a.yggHasJoined)
+	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/profile/", a.yggProfile)
 	static, _ := fs.Sub(frontend, "web/mc-skin/dist")
 	fileServer := http.FileServer(http.FS(static))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -482,6 +499,7 @@ func jsonOK(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 func jsonError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	jsonOK(w, map[string]any{"error": msg})
 }
@@ -597,7 +615,27 @@ func (a *app) skin(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
+func (a *app) publicSkin(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimPrefix(r.URL.Path, "/api/skin/")
+	if username == "" || !usernameRE.MatchString(username) {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open("data/skins/" + username + ".png")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = io.Copy(w, f)
+}
+
 func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	var in yggLogin
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		jsonError(w, "无效请求", 400)
@@ -619,9 +657,46 @@ func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
 		tok = randomToken()
 	}
 	a.tokens[tok] = in.Username
-	jsonOK(w, map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": map[string]string{"id": profileID(in.Username), "name": in.Username}})
+	profile := map[string]string{"id": profileID(in.Username), "name": in.Username}
+	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
+	if in.RequestUser {
+		result["user"] = map[string]any{"id": profile["id"], "properties": []any{}}
+	}
+	jsonOK(w, result)
 }
-func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) { a.yggAuthenticate(w, r) }
+func (a *app) yggMetadata(w http.ResponseWriter, r *http.Request) {
+	base := "http://" + r.Host
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		base = proto + "://" + r.Host
+	}
+	host := strings.Split(r.Host, ":")[0]
+	_ = base
+	jsonOK(w, map[string]any{"meta": map[string]string{"serverName": a.site, "implementationName": a.site, "implementationVersion": "1.0.0"}, "skinDomains": []string{host}, "signaturePublickey": ""})
+}
+func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		AccessToken     string            `json:"accessToken"`
+		ClientToken     string            `json:"clientToken"`
+		SelectedProfile map[string]string `json:"selectedProfile"`
+		RequestUser     bool              `json:"requestUser"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || a.tokens[in.AccessToken] == "" {
+		jsonError(w, "Forbidden", 403)
+		return
+	}
+	tok := in.ClientToken
+	if tok == "" {
+		tok = in.AccessToken
+	}
+	username := a.tokens[in.AccessToken]
+	a.tokens[tok] = username
+	profile := map[string]string{"id": profileID(username), "name": username}
+	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
+	if in.RequestUser {
+		result["user"] = map[string]any{"id": profile["id"], "properties": []any{}}
+	}
+	jsonOK(w, result)
+}
 func (a *app) yggValidate(w http.ResponseWriter, r *http.Request) {
 	if a.userFromToken(r) != "" {
 		w.WriteHeader(204)
@@ -639,7 +714,8 @@ func (a *app) yggInvalidate(w http.ResponseWriter, r *http.Request) {
 }
 func (a *app) yggJoin(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		AccessToken, SelectedProfile string `json:"accessToken"`
+		AccessToken     string `json:"accessToken"`
+		SelectedProfile string `json:"selectedProfile"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if a.tokens[in.AccessToken] == "" {
@@ -658,10 +734,11 @@ func (a *app) yggHasJoined(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	jsonOK(w, map[string]any{"id": profileID(sid), "name": sid, "properties": []any{}})
+	jsonOK(w, a.profileResponse(r, sid))
 }
 func (a *app) yggProfile(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/sessionserver/session/minecraft/profile/")
+	name = strings.TrimPrefix(name, "/api/yggdrasil/sessionserver/session/minecraft/profile/")
 	if name == "" {
 		http.NotFound(w, r)
 		return
@@ -671,6 +748,15 @@ func (a *app) yggProfile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	jsonOK(w, map[string]any{"id": profileID(u), "name": u, "properties": []any{}})
+	jsonOK(w, a.profileResponse(r, u))
 }
 func profileID(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:])[:32] }
+func (a *app) profileResponse(r *http.Request, username string) map[string]any {
+	base := "http://" + r.Host
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		base = proto + "://" + r.Host
+	}
+	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": map[string]any{"SKIN": map[string]string{"url": base + "/api/skin/" + username}}}
+	b, _ := json.Marshal(textures)
+	return map[string]any{"id": profileID(username), "name": username, "properties": []any{map[string]string{"name": "textures", "value": base64.StdEncoding.EncodeToString(b)}}}
+}
