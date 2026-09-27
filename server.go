@@ -30,11 +30,10 @@ import (
 	"strings"
 	"time"
 
+	glebarezsqlite "github.com/glebarez/sqlite"
 	_ "github.com/go-sql-driver/mysql"
 	gormmysql "gorm.io/driver/mysql"
-	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	_ "modernc.org/sqlite"
 )
 
 //go:embed web/mc-skin/dist/*
@@ -104,7 +103,7 @@ func main() {
 	if driver == "mysql" {
 		gdb, err = gorm.Open(gormmysql.Open(dsn), &gorm.Config{})
 	} else {
-		gdb, err = gorm.Open(gormsqlite.Open(dsn), &gorm.Config{})
+		gdb, err = gorm.Open(glebarezsqlite.Open(dsn), &gorm.Config{})
 	}
 	if err != nil {
 		log.Fatal(err)
