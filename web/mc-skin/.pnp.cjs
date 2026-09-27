@@ -50,6 +50,7 @@ const RAW_RUNTIME_STATE =
           ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
           ["react-router-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4"],\
           ["shadcn", "npm:4.21.0"],\
+          ["skinview3d", "npm:3.4.2"],\
           ["tailwindcss", "npm:4.3.3"],\
           ["tw-animate-css", "npm:1.4.0"],\
           ["typescript", "patch:typescript@npm%3A6.0.3#optional!builtin<compat/typescript>::version=6.0.3&hash=5786d5"],\
@@ -1460,11 +1461,42 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["@types/stats.js", [\
+      ["npm:0.17.4", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/@types-stats.js-npm-0.17.4-13771bf0c2-10c0.zip/node_modules/@types/stats.js/",\
+        "packageDependencies": [\
+          ["@types/stats.js", "npm:0.17.4"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["@types/three", [\
+      ["npm:0.156.0", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/@types-three-npm-0.156.0-ead6ccc38a-10c0.zip/node_modules/@types/three/",\
+        "packageDependencies": [\
+          ["@types/stats.js", "npm:0.17.4"],\
+          ["@types/three", "npm:0.156.0"],\
+          ["@types/webxr", "npm:0.5.24"],\
+          ["fflate", "npm:0.6.11"],\
+          ["meshoptimizer", "npm:0.18.1"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["@types/validate-npm-package-name", [\
       ["npm:4.0.2", {\
         "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/@types-validate-npm-package-name-npm-4.0.2-f2fb86e61e-10c0.zip/node_modules/@types/validate-npm-package-name/",\
         "packageDependencies": [\
           ["@types/validate-npm-package-name", "npm:4.0.2"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["@types/webxr", [\
+      ["npm:0.5.24", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/@types-webxr-npm-0.5.24-21de648b6c-10c0.zip/node_modules/@types/webxr/",\
+        "packageDependencies": [\
+          ["@types/webxr", "npm:0.5.24"]\
         ],\
         "linkType": "HARD"\
       }]\
@@ -3040,6 +3072,15 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["fflate", [\
+      ["npm:0.6.11", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/fflate-npm-0.6.11-d66e7c3884-10c0.zip/node_modules/fflate/",\
+        "packageDependencies": [\
+          ["fflate", "npm:0.6.11"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["figures", [\
       ["npm:6.1.0", {\
         "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/figures-npm-6.1.0-af5576db56-10c0.zip/node_modules/figures/",\
@@ -4173,6 +4214,7 @@ const RAW_RUNTIME_STATE =
           ["react-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:19.3.0"],\
           ["react-router-dom", "virtual:ba704f9e90a8685dc204c5bcc75637124f6df63402ce6bca2ac69fcabfb765b43553e55a9aaecee49357f32878f1a29f5ab4ad2b1209a81cefaaf910765cb8fa#npm:7.18.4"],\
           ["shadcn", "npm:4.21.0"],\
+          ["skinview3d", "npm:3.4.2"],\
           ["tailwindcss", "npm:4.3.3"],\
           ["tw-animate-css", "npm:1.4.0"],\
           ["typescript", "patch:typescript@npm%3A6.0.3#optional!builtin<compat/typescript>::version=6.0.3&hash=5786d5"],\
@@ -4214,6 +4256,15 @@ const RAW_RUNTIME_STATE =
         "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/merge2-npm-1.4.1-a2507bd06c-10c0.zip/node_modules/merge2/",\
         "packageDependencies": [\
           ["merge2", "npm:1.4.1"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["meshoptimizer", [\
+      ["npm:0.18.1", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/meshoptimizer-npm-0.18.1-ce62c2344d-10c0.zip/node_modules/meshoptimizer/",\
+        "packageDependencies": [\
+          ["meshoptimizer", "npm:0.18.1"]\
         ],\
         "linkType": "HARD"\
       }]\
@@ -5470,6 +5521,27 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["skinview-utils", [\
+      ["npm:0.7.1", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/skinview-utils-npm-0.7.1-1c6760aa50-10c0.zip/node_modules/skinview-utils/",\
+        "packageDependencies": [\
+          ["skinview-utils", "npm:0.7.1"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["skinview3d", [\
+      ["npm:3.4.2", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/skinview3d-npm-3.4.2-ac40cb0109-10c0.zip/node_modules/skinview3d/",\
+        "packageDependencies": [\
+          ["@types/three", "npm:0.156.0"],\
+          ["skinview-utils", "npm:0.7.1"],\
+          ["skinview3d", "npm:3.4.2"],\
+          ["three", "npm:0.156.1"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["smart-buffer", [\
       ["npm:4.2.0", {\
         "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/smart-buffer-npm-4.2.0-5ac3f668bb-10c0.zip/node_modules/smart-buffer/",\
@@ -5630,6 +5702,15 @@ const RAW_RUNTIME_STATE =
           ["minizlib", "npm:3.1.0"],\
           ["tar", "npm:7.5.22"],\
           ["yallist", "npm:5.0.0"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["three", [\
+      ["npm:0.156.1", {\
+        "packageLocation": "../../../../../C:/Users/FireGuo/AppData/Local/Yarn/Berry/cache/three-npm-0.156.1-ccb18525f7-10c0.zip/node_modules/three/",\
+        "packageDependencies": [\
+          ["three", "npm:0.156.1"]\
         ],\
         "linkType": "HARD"\
       }]\

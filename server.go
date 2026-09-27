@@ -31,6 +31,9 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
+	gormsqlite "gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	_ "modernc.org/sqlite"
 )
 
@@ -42,6 +45,7 @@ var studentRE = regexp.MustCompile(`^[0-9]+$`)
 
 type app struct {
 	db           *sql.DB
+	gormDB       *gorm.DB
 	driver, site string
 	adminStudent string
 	tokens       map[string]string
@@ -59,6 +63,20 @@ type yggLogin struct {
 	Password    string `json:"password"`
 	ClientToken string `json:"clientToken"`
 	RequestUser bool   `json:"requestUser"`
+}
+type User struct {
+	ID           uint   `gorm:"primaryKey"`
+	StudentID    string `gorm:"uniqueIndex;size:64;not null"`
+	Username     string `gorm:"uniqueIndex;size:64;not null"`
+	PasswordHash string `gorm:"not null"`
+	Banned       bool
+	CreatedAt    time.Time
+}
+type Session struct {
+	AccessToken string    `gorm:"primaryKey;size:128"`
+	ClientToken string    `gorm:"size:128;not null"`
+	Username    string    `gorm:"size:64;not null;index"`
+	ExpiresAt   time.Time `gorm:"index"`
 }
 
 func main() {
@@ -82,17 +100,23 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	var gdb *gorm.DB
+	if driver == "mysql" {
+		gdb, err = gorm.Open(gormmysql.Open(dsn), &gorm.Config{})
+	} else {
+		gdb, err = gorm.Open(gormsqlite.Open(dsn), &gorm.Config{})
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err = gdb.AutoMigrate(&User{}, &Session{}); err != nil {
+		log.Fatal(err)
+	}
 	schema := `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id VARCHAR(64) UNIQUE NOT NULL, username VARCHAR(64) UNIQUE NOT NULL, password_hash TEXT NOT NULL, banned INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL)`
 	if driver == "mysql" {
 		schema = `CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY AUTO_INCREMENT, student_id VARCHAR(64) UNIQUE NOT NULL, username VARCHAR(64) UNIQUE NOT NULL, password_hash TEXT NOT NULL, banned BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP NOT NULL)`
 	}
-	if _, err = db.Exec(schema); err != nil {
-		log.Fatal(err)
-	}
-	sessionSchema := `CREATE TABLE IF NOT EXISTS sessions (access_token VARCHAR(128) PRIMARY KEY, client_token VARCHAR(128) NOT NULL, username VARCHAR(64) NOT NULL, expires_at TIMESTAMP NOT NULL)`
-	if _, err = db.Exec(sessionSchema); err != nil {
-		log.Fatal(err)
-	}
+	_ = schema
 	ttl := 30 * 24 * time.Hour
 	if raw := os.Getenv("TOKEN_TTL_HOURS"); raw != "" {
 		if hours, parseErr := strconv.Atoi(raw); parseErr == nil && hours > 0 {
@@ -107,7 +131,7 @@ func main() {
 	if keyErr != nil {
 		log.Fatal(keyErr)
 	}
-	a := &app{db: db, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
+	a := &app{db: db, gormDB: gdb, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		jsonOK(w, map[string]any{"ok": true, "siteName": a.site})
@@ -121,6 +145,7 @@ func main() {
 	mux.HandleFunc("/api/skin", a.skin)
 	mux.HandleFunc("/api/skin/", a.publicSkin)
 	mux.HandleFunc("/textures/", a.texture)
+	mux.HandleFunc("/api/yggdrasil/textures/", a.texture)
 	mux.HandleFunc("/skins/MinecraftSkins/", a.legacySkin)
 	mux.HandleFunc("/authserver/authenticate", a.yggAuthenticate)
 	mux.HandleFunc("/authserver/authenticate/", a.yggAuthenticate)
@@ -220,8 +245,8 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "用户名至少3位，密码至少6位", 400)
 		return
 	}
-	var exists int
-	if a.db.QueryRow("SELECT COUNT(*) FROM users WHERE student_id = ? OR username = ?", in.StudentID, in.Username).Scan(&exists) != nil {
+	var exists int64
+	if a.gormDB.Model(&User{}).Where("student_id = ? OR username = ?", in.StudentID, in.Username).Count(&exists).Error != nil {
 		jsonError(w, "数据库错误", 500)
 		return
 	}
@@ -245,7 +270,7 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, _ := hashPassword(in.Password)
-	if _, err = a.db.Exec("INSERT INTO users(student_id,username,password_hash,created_at) VALUES(?,?,?,?)", in.StudentID, in.Username, hash, time.Now()); err != nil {
+	if err = a.gormDB.Create(&User{StudentID: in.StudentID, Username: in.Username, PasswordHash: hash, CreatedAt: time.Now()}).Error; err != nil {
 		jsonError(w, "用户名已存在", 409)
 		return
 	}
@@ -262,13 +287,12 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "请求格式错误", 400)
 		return
 	}
-	var stored string
-	var banned int
-	if a.db.QueryRow("SELECT password_hash,banned FROM users WHERE username = ?", in.Username).Scan(&stored, &banned) != nil || banned != 0 {
+	var account User
+	if a.gormDB.Where("username = ?", in.Username).First(&account).Error != nil || account.Banned {
 		jsonError(w, "用户名或密码错误", 401)
 		return
 	}
-	ok, _ := verifyPassword(stored, in.Password)
+	ok, _ := verifyPassword(account.PasswordHash, in.Password)
 	if !ok {
 		jsonError(w, "用户名或密码错误", 401)
 		return
@@ -559,23 +583,21 @@ func (a *app) userFromToken(r *http.Request) string {
 	if user := a.tokens[p]; user != "" {
 		return user
 	}
-	var user string
-	var expires time.Time
-	if a.db.QueryRow("SELECT username,expires_at FROM sessions WHERE access_token=?", p).Scan(&user, &expires) == nil && time.Now().Before(expires) {
+	var session Session
+	if a.gormDB.First(&session, "access_token = ?", p).Error == nil && time.Now().Before(session.ExpiresAt) {
+		user := session.Username
 		a.tokens[p] = user
 		return user
 	}
 	return ""
 }
 func (a *app) saveToken(access, client, username string) error {
-	_, err := a.db.Exec("INSERT OR REPLACE INTO sessions(access_token,client_token,username,expires_at) VALUES(?,?,?,?)", access, client, username, time.Now().Add(a.tokenTTL))
-	return err
+	return a.gormDB.Save(&Session{AccessToken: access, ClientToken: client, Username: username, ExpiresAt: time.Now().Add(a.tokenTTL)}).Error
 }
 func (a *app) tokenUser(access string) string {
-	var user string
-	var expires time.Time
-	if a.db.QueryRow("SELECT username,expires_at FROM sessions WHERE access_token=?", access).Scan(&user, &expires) == nil && time.Now().Before(expires) {
-		return user
+	var session Session
+	if a.gormDB.First(&session, "access_token = ?", access).Error == nil && time.Now().Before(session.ExpiresAt) {
+		return session.Username
 	}
 	return ""
 }
@@ -689,6 +711,7 @@ func (a *app) legacySkin(w http.ResponseWriter, r *http.Request) {
 }
 func (a *app) texture(w http.ResponseWriter, r *http.Request) {
 	hash := strings.TrimPrefix(r.URL.Path, "/textures/")
+	hash = strings.TrimPrefix(hash, "/api/yggdrasil/textures/")
 	if !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(hash) {
 		http.NotFound(w, r)
 		return
@@ -842,6 +865,19 @@ func (a *app) yggProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	var u string
 	if a.db.QueryRow("SELECT username FROM users WHERE username=?", name).Scan(&u) != nil {
+		rows, _ := a.db.Query("SELECT username FROM users")
+		if rows != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var candidate string
+				if rows.Scan(&candidate) == nil && profileID(candidate) == name {
+					u = candidate
+					break
+				}
+			}
+		}
+	}
+	if u == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -857,7 +893,7 @@ func (a *app) profileResponse(r *http.Request, username string) map[string]any {
 	textureMap := map[string]any{}
 	if skinErr == nil && len(skin) > 0 {
 		sum := sha256.Sum256(skin)
-		textureMap["SKIN"] = map[string]string{"url": base + "/textures/" + hex.EncodeToString(sum[:])}
+		textureMap["SKIN"] = map[string]string{"url": base + "/api/yggdrasil/textures/" + hex.EncodeToString(sum[:])}
 	}
 	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": textureMap}
 	b, _ := json.Marshal(textures)

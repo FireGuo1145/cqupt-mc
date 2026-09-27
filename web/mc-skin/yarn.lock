@@ -1089,10 +1089,36 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/stats.js@npm:*":
+  version: 0.17.4
+  resolution: "@types/stats.js@npm:0.17.4"
+  checksum: 10c0/4fe0429998519f0476f03a25b4900b4d4a1474606478657271e40a884f7936ba902ea564b1c95cfd33a8e84af46cef6e1e98bb23e86fd3b6676cd5b974987151
+  languageName: node
+  linkType: hard
+
+"@types/three@npm:^0.156.0":
+  version: 0.156.0
+  resolution: "@types/three@npm:0.156.0"
+  dependencies:
+    "@types/stats.js": "npm:*"
+    "@types/webxr": "npm:*"
+    fflate: "npm:~0.6.10"
+    meshoptimizer: "npm:~0.18.1"
+  checksum: 10c0/a1b3f6ede6022dd8d2599b09a1f7af6fd09704ebfbf17023e6e17c246c5f68ae972167c85f202eaa2e16da7dc3dee07e1c304476e302273b072f43cc6df322ff
+  languageName: node
+  linkType: hard
+
 "@types/validate-npm-package-name@npm:^4.0.2":
   version: 4.0.2
   resolution: "@types/validate-npm-package-name@npm:4.0.2"
   checksum: 10c0/5a109fe12570b7125740fdac8678970e3caf7de0cbd6e15cf93dad67a427a3a83e0759b5d4b64fd75bce6cdf43b0569275456a35183059046cba6c25d096b916
+  languageName: node
+  linkType: hard
+
+"@types/webxr@npm:*":
+  version: 0.5.24
+  resolution: "@types/webxr@npm:0.5.24"
+  checksum: 10c0/ff59ffd390d06ca3f89ab2531d583ac10bc5e2ab82e5a01ecc40fbc365224a3375e7caa5b14649cf6141db21fb024940da7ad2bd8faa3cd497a6665257cb53b5
   languageName: node
   linkType: hard
 
@@ -2307,6 +2333,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"fflate@npm:~0.6.10":
+  version: 0.6.11
+  resolution: "fflate@npm:0.6.11"
+  checksum: 10c0/5bbf4a7557db6f65b25c7bb12621008c400a116ec1cc65bea78abd75c0c049d8a22fb92f0a59fbf9a7ad1a24a47d2112ce10fd817d08db0e1bf7dc82e780faa1
+  languageName: node
+  linkType: hard
+
 "figures@npm:^6.1.0":
   version: 6.1.0
   resolution: "figures@npm:6.1.0"
@@ -3358,6 +3391,7 @@ __metadata:
     react-dom: "npm:^19.2.8"
     react-router-dom: "npm:^7.18.4"
     shadcn: "npm:^4.21.0"
+    skinview3d: "npm:^3.4.2"
     tailwindcss: "npm:^4"
     tw-animate-css: "npm:^1.4.0"
     typescript: "npm:~6"
@@ -3391,6 +3425,13 @@ __metadata:
   version: 1.4.1
   resolution: "merge2@npm:1.4.1"
   checksum: 10c0/254a8a4605b58f450308fc474c82ac9a094848081bf4c06778200207820e5193726dc563a0d2c16468810516a5c97d9d3ea0ca6585d23c58ccfff2403e8dbbeb
+  languageName: node
+  linkType: hard
+
+"meshoptimizer@npm:~0.18.1":
+  version: 0.18.1
+  resolution: "meshoptimizer@npm:0.18.1"
+  checksum: 10c0/8a825c58b20b65585e8d00788843929b60c66ba4297e89afaa49f7c51ab9a0f7b9130f90cc9ad1b9b48b3d1bee3beb1bc93608acba0d73e78995c3e6e5ca436b
   languageName: node
   linkType: hard
 
@@ -4465,6 +4506,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"skinview-utils@npm:^0.7.1":
+  version: 0.7.1
+  resolution: "skinview-utils@npm:0.7.1"
+  checksum: 10c0/b460ff098a3da49e1cbc986c3a3229d22560100dda8ca19fc63ad8b45991ff7675cf692963e22ec2baaaa6de1300b7339e516f48e65e23527d7847258a07d0d4
+  languageName: node
+  linkType: hard
+
+"skinview3d@npm:^3.4.2":
+  version: 3.4.2
+  resolution: "skinview3d@npm:3.4.2"
+  dependencies:
+    "@types/three": "npm:^0.156.0"
+    skinview-utils: "npm:^0.7.1"
+    three: "npm:^0.156.0"
+  checksum: 10c0/3ba838a8f7eb3c3306e8d44958ba8f8d51b67dbcdcd5fa760da791e51538160894409a051516da7e9cacc5bf59ec0a83c28c25a17da52827574c92ba7be3c3f0
+  languageName: node
+  linkType: hard
+
 "smart-buffer@npm:^4.2.0":
   version: 4.2.0
   resolution: "smart-buffer@npm:4.2.0"
@@ -4605,6 +4664,13 @@ __metadata:
     minizlib: "npm:^3.1.0"
     yallist: "npm:^5.0.0"
   checksum: 10c0/1311f6be85a8157ac4c9147bae43e13923d2a1aae15e4aa1bd5239e4e03d2cf53cfe103dde7f35832fbb4c938b042856bc8e9a0afd29abd05e2d1608788c4fea
+  languageName: node
+  linkType: hard
+
+"three@npm:^0.156.0":
+  version: 0.156.1
+  resolution: "three@npm:0.156.1"
+  checksum: 10c0/e1f8c5e1a1f4c9b431279c3b9875cbd64b2456c2031116543583320192873042d18e7c1255edb9f9b167796ae338e08e9185cfdd29c3fc721e37bb35cfd6b118
   languageName: node
   linkType: hard
 
