@@ -51,6 +51,7 @@ type app struct {
 	signatureKey string
 	signingKey   *rsa.PrivateKey
 	tokenTTL     time.Duration
+	limiter      *RateLimiter
 }
 type credentials struct {
 	Username string `json:"username"`
@@ -130,13 +131,17 @@ func main() {
 	if keyErr != nil {
 		log.Fatal(keyErr)
 	}
-	a := &app{db: db, gormDB: gdb, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
+	a := &app{db: db, gormDB: gdb, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, limiter: NewRateLimiter(), signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		jsonOK(w, map[string]any{"ok": true, "siteName": a.site})
 	})
 	mux.HandleFunc("/api/register", a.register)
 	mux.HandleFunc("/api/login", a.login)
+	mux.HandleFunc("/api/password", a.changePassword)
+	mux.HandleFunc("/api/legal", legalStatus)
+	mux.HandleFunc("/tos.html", legalPage("tos.html"))
+	mux.HandleFunc("/privacy.html", legalPage("privacy.html"))
 	mux.HandleFunc("/api/launcher/login", a.login)
 	mux.HandleFunc("/api/admin/users", a.adminUsers)
 	mux.HandleFunc("/api/admin/ban", a.adminBan)
@@ -227,6 +232,10 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	if !a.limiter.Allow("register:ip:"+clientIP(r), 10, time.Minute) {
+		rateLimitError(w, "注册请求过于频繁，请稍后再试")
+		return
+	}
 	var in registration
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		jsonError(w, "请求格式错误", 400)
@@ -251,6 +260,10 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	}
 	if exists > 0 {
 		jsonError(w, "统一账号或本站用户名已注册", 409)
+		return
+	}
+	if !a.limiter.Allow("probe:global", 5, time.Minute) {
+		rateLimitError(w, "统一认证验证次数已达到全局上限，请一分钟后再试")
 		return
 	}
 	status, err := probe(in.StudentID, in.StudentPassword, in.Captcha)
@@ -281,6 +294,10 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	if !a.limiter.Allow("login:ip:"+clientIP(r), 20, time.Minute) {
+		rateLimitError(w, "登录请求过于频繁，请稍后再试")
+		return
+	}
 	var in credentials
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		jsonError(w, "请求格式错误", 400)
@@ -300,6 +317,63 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	a.tokens[token] = in.Username
 	_ = a.saveToken(token, token, in.Username)
 	jsonOK(w, map[string]any{"ok": true, "username": in.Username, "accessToken": token, "clientToken": token, "launcher": r.URL.Path == "/api/launcher/login"})
+}
+
+func (a *app) changePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", 405)
+		return
+	}
+	username := a.userFromToken(r)
+	if username == "" {
+		jsonError(w, "登录已失效", 401)
+		return
+	}
+	var in struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if json.NewDecoder(r.Body).Decode(&in) != nil || len(in.NewPassword) < 6 {
+		jsonError(w, "新密码至少6位", 400)
+		return
+	}
+	var user User
+	if a.gormDB.Where("username = ?", username).First(&user).Error != nil {
+		jsonError(w, "用户不存在", 404)
+		return
+	}
+	ok, _ := verifyPassword(user.PasswordHash, in.CurrentPassword)
+	if !ok {
+		jsonError(w, "当前密码错误", 403)
+		return
+	}
+	hash, err := hashPassword(in.NewPassword)
+	if err != nil {
+		jsonError(w, "密码生成失败", 500)
+		return
+	}
+	if err = a.gormDB.Model(&user).Update("password_hash", hash).Error; err != nil {
+		jsonError(w, "保存失败", 500)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+func legalStatus(w http.ResponseWriter, _ *http.Request) {
+	_, tos := os.Stat("tos.html")
+	_, privacy := os.Stat("privacy.html")
+	jsonOK(w, map[string]bool{"tos": tos == nil, "privacy": privacy == nil})
+}
+func legalPage(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+	}
 }
 
 func probe(user, pass, captcha string) (string, error) {
