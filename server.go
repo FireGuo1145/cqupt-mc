@@ -2,16 +2,21 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +45,9 @@ type app struct {
 	driver, site string
 	adminStudent string
 	tokens       map[string]string
+	signatureKey string
+	signingKey   *rsa.PrivateKey
+	tokenTTL     time.Duration
 }
 type credentials struct {
 	Username string `json:"username"`
@@ -80,9 +89,29 @@ func main() {
 	if _, err = db.Exec(schema); err != nil {
 		log.Fatal(err)
 	}
-	a := &app{db: db, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}}
+	sessionSchema := `CREATE TABLE IF NOT EXISTS sessions (access_token VARCHAR(128) PRIMARY KEY, client_token VARCHAR(128) NOT NULL, username VARCHAR(64) NOT NULL, expires_at TIMESTAMP NOT NULL)`
+	if _, err = db.Exec(sessionSchema); err != nil {
+		log.Fatal(err)
+	}
+	ttl := 30 * 24 * time.Hour
+	if raw := os.Getenv("TOKEN_TTL_HOURS"); raw != "" {
+		if hours, parseErr := strconv.Atoi(raw); parseErr == nil && hours > 0 {
+			ttl = time.Duration(hours) * time.Hour
+		}
+	}
+	signingKey, keyErr := loadSigningKey("data/signing-key.pem")
+	if keyErr != nil {
+		log.Fatal(keyErr)
+	}
+	publicKey, keyErr := x509.MarshalPKIXPublicKey(&signingKey.PublicKey)
+	if keyErr != nil {
+		log.Fatal(keyErr)
+	}
+	a := &app{db: db, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) { jsonOK(w, map[string]any{"ok": true}) })
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
+		jsonOK(w, map[string]any{"ok": true, "siteName": a.site})
+	})
 	mux.HandleFunc("/api/register", a.register)
 	mux.HandleFunc("/api/login", a.login)
 	mux.HandleFunc("/api/launcher/login", a.login)
@@ -91,6 +120,8 @@ func main() {
 	mux.HandleFunc("/api/admin/delete", a.adminDelete)
 	mux.HandleFunc("/api/skin", a.skin)
 	mux.HandleFunc("/api/skin/", a.publicSkin)
+	mux.HandleFunc("/textures/", a.texture)
+	mux.HandleFunc("/skins/MinecraftSkins/", a.legacySkin)
 	mux.HandleFunc("/authserver/authenticate", a.yggAuthenticate)
 	mux.HandleFunc("/authserver/authenticate/", a.yggAuthenticate)
 	mux.HandleFunc("/authserver/refresh", a.yggRefresh)
@@ -244,6 +275,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token := randomToken()
 	a.tokens[token] = in.Username
+	_ = a.saveToken(token, token, in.Username)
 	jsonOK(w, map[string]any{"ok": true, "username": in.Username, "accessToken": token, "clientToken": token, "launcher": r.URL.Path == "/api/launcher/login"})
 }
 
@@ -524,7 +556,28 @@ func getenv(k, fallback string) string {
 func randomToken() string { b := make([]byte, 24); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (a *app) userFromToken(r *http.Request) string {
 	p := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return a.tokens[p]
+	if user := a.tokens[p]; user != "" {
+		return user
+	}
+	var user string
+	var expires time.Time
+	if a.db.QueryRow("SELECT username,expires_at FROM sessions WHERE access_token=?", p).Scan(&user, &expires) == nil && time.Now().Before(expires) {
+		a.tokens[p] = user
+		return user
+	}
+	return ""
+}
+func (a *app) saveToken(access, client, username string) error {
+	_, err := a.db.Exec("INSERT OR REPLACE INTO sessions(access_token,client_token,username,expires_at) VALUES(?,?,?,?)", access, client, username, time.Now().Add(a.tokenTTL))
+	return err
+}
+func (a *app) tokenUser(access string) string {
+	var user string
+	var expires time.Time
+	if a.db.QueryRow("SELECT username,expires_at FROM sessions WHERE access_token=?", access).Scan(&user, &expires) == nil && time.Now().Before(expires) {
+		return user
+	}
+	return ""
 }
 func (a *app) isAdmin(username string) bool {
 	if username == "" {
@@ -630,6 +683,46 @@ func (a *app) publicSkin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	_, _ = io.Copy(w, f)
 }
+func (a *app) legacySkin(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skins/MinecraftSkins/"), ".png")
+	a.serveSkinByUser(w, username)
+}
+func (a *app) texture(w http.ResponseWriter, r *http.Request) {
+	hash := strings.TrimPrefix(r.URL.Path, "/textures/")
+	if !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(hash) {
+		http.NotFound(w, r)
+		return
+	}
+	entries, _ := os.ReadDir("data/skins")
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".png") {
+			continue
+		}
+		b, err := os.ReadFile("data/skins/" + entry.Name())
+		if err == nil {
+			sum := sha256.Sum256(b)
+			if hex.EncodeToString(sum[:]) == strings.ToLower(hash) {
+				w.Header().Set("Content-Type", "image/png")
+				_, _ = w.Write(b)
+				return
+			}
+		}
+	}
+	http.NotFound(w, r)
+}
+func (a *app) serveSkinByUser(w http.ResponseWriter, username string) {
+	if username == "" || !usernameRE.MatchString(username) {
+		http.NotFound(w, nil)
+		return
+	}
+	b, err := os.ReadFile("data/skins/" + username + ".png")
+	if err != nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(b)
+}
 
 func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -657,6 +750,7 @@ func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
 		tok = randomToken()
 	}
 	a.tokens[tok] = in.Username
+	_ = a.saveToken(tok, tok, in.Username)
 	profile := map[string]string{"id": profileID(in.Username), "name": in.Username}
 	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
 	if in.RequestUser {
@@ -671,7 +765,8 @@ func (a *app) yggMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	host := strings.Split(r.Host, ":")[0]
 	_ = base
-	jsonOK(w, map[string]any{"meta": map[string]string{"serverName": a.site, "implementationName": a.site, "implementationVersion": "1.0.0"}, "skinDomains": []string{host}, "signaturePublickey": ""})
+	w.Header().Set("X-Authlib-Injector-API-Location", "/api/yggdrasil/")
+	jsonOK(w, map[string]any{"meta": map[string]any{"serverName": a.site, "implementationName": a.site, "implementationVersion": "1.0.0", "feature.non_email_login": true, "feature.legacy_skin_api": true, "links": map[string]string{"homepage": base + "/", "register": base + "/login"}}, "skinDomains": []string{host}, "signaturePublickey": a.signatureKey})
 }
 func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -680,7 +775,7 @@ func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
 		SelectedProfile map[string]string `json:"selectedProfile"`
 		RequestUser     bool              `json:"requestUser"`
 	}
-	if json.NewDecoder(r.Body).Decode(&in) != nil || a.tokens[in.AccessToken] == "" {
+	if json.NewDecoder(r.Body).Decode(&in) != nil || a.tokenUser(in.AccessToken) == "" {
 		jsonError(w, "Forbidden", 403)
 		return
 	}
@@ -688,8 +783,9 @@ func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
 	if tok == "" {
 		tok = in.AccessToken
 	}
-	username := a.tokens[in.AccessToken]
+	username := a.tokenUser(in.AccessToken)
 	a.tokens[tok] = username
+	_ = a.saveToken(tok, tok, username)
 	profile := map[string]string{"id": profileID(username), "name": username}
 	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
 	if in.RequestUser {
@@ -710,6 +806,7 @@ func (a *app) yggInvalidate(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	delete(a.tokens, in.AccessToken)
+	_, _ = a.db.Exec("DELETE FROM sessions WHERE access_token=?", in.AccessToken)
 	w.WriteHeader(204)
 }
 func (a *app) yggJoin(w http.ResponseWriter, r *http.Request) {
@@ -718,7 +815,7 @@ func (a *app) yggJoin(w http.ResponseWriter, r *http.Request) {
 		SelectedProfile string `json:"selectedProfile"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	if a.tokens[in.AccessToken] == "" {
+	if a.tokenUser(in.AccessToken) == "" {
 		jsonError(w, "Forbidden", 403)
 		return
 	}
@@ -756,7 +853,46 @@ func (a *app) profileResponse(r *http.Request, username string) map[string]any {
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		base = proto + "://" + r.Host
 	}
-	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": map[string]any{"SKIN": map[string]string{"url": base + "/api/skin/" + username}}}
+	skin, _ := os.ReadFile("data/skins/" + username + ".png")
+	sum := sha256.Sum256(skin)
+	skinURL := base + "/textures/" + hex.EncodeToString(sum[:])
+	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": map[string]any{"SKIN": map[string]string{"url": skinURL}}}
 	b, _ := json.Marshal(textures)
-	return map[string]any{"id": profileID(username), "name": username, "properties": []any{map[string]string{"name": "textures", "value": base64.StdEncoding.EncodeToString(b)}}}
+	value := base64.StdEncoding.EncodeToString(b)
+	property := map[string]string{"name": "textures", "value": value}
+	digest := sha1.Sum([]byte(value))
+	if a.signingKey != nil {
+		if signature, err := rsa.SignPKCS1v15(rand.Reader, a.signingKey, crypto.SHA1, digest[:]); err == nil {
+			property["signature"] = base64.StdEncoding.EncodeToString(signature)
+		}
+	}
+	return map[string]any{"id": profileID(username), "name": username, "properties": []any{property, map[string]string{"name": "uploadableTextures", "value": "skin"}}}
+}
+
+func loadSigningKey(path string) (*rsa.PrivateKey, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		block, _ := pem.Decode(b)
+		if block != nil {
+			if key, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
+				return key, nil
+			}
+			if parsed, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes); parseErr == nil {
+				if key, ok := parsed.(*rsa.PrivateKey); ok {
+					return key, nil
+				}
+			}
+		}
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll("data", 0700); err != nil {
+		return nil, err
+	}
+	der := x509.MarshalPKCS1PrivateKey(key)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}), 0600); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
