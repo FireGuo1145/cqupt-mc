@@ -853,10 +853,13 @@ func (a *app) profileResponse(r *http.Request, username string) map[string]any {
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
 		base = proto + "://" + r.Host
 	}
-	skin, _ := os.ReadFile("data/skins/" + username + ".png")
-	sum := sha256.Sum256(skin)
-	skinURL := base + "/textures/" + hex.EncodeToString(sum[:])
-	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": map[string]any{"SKIN": map[string]string{"url": skinURL}}}
+	skin, skinErr := os.ReadFile("data/skins/" + username + ".png")
+	textureMap := map[string]any{}
+	if skinErr == nil && len(skin) > 0 {
+		sum := sha256.Sum256(skin)
+		textureMap["SKIN"] = map[string]string{"url": base + "/textures/" + hex.EncodeToString(sum[:])}
+	}
+	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": textureMap}
 	b, _ := json.Marshal(textures)
 	value := base64.StdEncoding.EncodeToString(b)
 	property := map[string]string{"name": "textures", "value": value}
