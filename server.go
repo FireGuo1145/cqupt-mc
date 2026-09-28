@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	glebarezsqlite "github.com/glebarez/sqlite"
@@ -52,12 +53,21 @@ type app struct {
 	signingKey   *rsa.PrivateKey
 	tokenTTL     time.Duration
 	limiter      *RateLimiter
+	challengeMu  sync.Mutex
+	challenges   map[string]*captchaChallenge
 }
 type credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
-type registration struct{ StudentID, StudentPassword, Captcha, Username, Password string }
+type registration struct{ StudentID, StudentPassword, Captcha, CaptchaToken, Username, Password string }
+type captchaChallenge struct {
+	username string
+	client   *http.Client
+	fields   map[string]string
+	image    string
+	expires  time.Time
+}
 type yggLogin struct {
 	Username    string `json:"username"`
 	Password    string `json:"password"`
@@ -131,7 +141,7 @@ func main() {
 	if keyErr != nil {
 		log.Fatal(keyErr)
 	}
-	a := &app{db: db, gormDB: gdb, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, tokenTTL: ttl, limiter: NewRateLimiter(), signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
+	a := &app{db: db, gormDB: gdb, driver: driver, site: getenv("SITE_NAME", "CQUPT Minecraft"), adminStudent: os.Getenv("ADMIN_STUDENT_ID"), tokens: map[string]string{}, challenges: map[string]*captchaChallenge{}, tokenTTL: ttl, limiter: NewRateLimiter(), signingKey: signingKey, signatureKey: "-----BEGIN PUBLIC KEY-----\n" + base64.StdEncoding.EncodeToString(publicKey) + "\n-----END PUBLIC KEY-----\n"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		jsonOK(w, map[string]any{"ok": true, "siteName": a.site})
@@ -266,15 +276,35 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		rateLimitError(w, "统一认证验证次数已达到全局上限，请一分钟后再试")
 		return
 	}
-	status, err := probe(in.StudentID, in.StudentPassword, in.Captcha)
+	var challenge *captchaChallenge
+	if in.CaptchaToken != "" {
+		a.challengeMu.Lock()
+		challenge = a.challenges[in.CaptchaToken]
+		delete(a.challenges, in.CaptchaToken)
+		a.challengeMu.Unlock()
+		if challenge == nil || time.Now().After(challenge.expires) || challenge.username != in.StudentID || strings.TrimSpace(in.Captcha) == "" {
+			jsonError(w, "验证码已过期，请重新验证", 400)
+			return
+		}
+	}
+	status, pending, err := probe(in.StudentID, in.StudentPassword, in.Captcha, challenge)
 	if err != nil {
 		log.Printf("CQUPT probe error: %v", err)
 		jsonError(w, "统一认证服务暂时不可用: "+err.Error(), 502)
 		return
 	}
-	if status == "captcha-required" && in.Captcha == "" {
+	if status == "captcha-required" && pending != nil {
+		token := randomToken()
+		a.challengeMu.Lock()
+		for key, old := range a.challenges {
+			if time.Now().After(old.expires) {
+				delete(a.challenges, key)
+			}
+		}
+		a.challenges[token] = pending
+		a.challengeMu.Unlock()
 		w.WriteHeader(http.StatusPreconditionRequired)
-		jsonOK(w, map[string]any{"error": "统一认证需要验证码", "code": "captcha-required"})
+		jsonOK(w, map[string]any{"error": "统一认证需要验证码", "code": "captcha-required", "captchaToken": token, "captchaImage": pending.image})
 		return
 	}
 	if status != "credentials-correct" && status != "authenticated" {
@@ -376,48 +406,71 @@ func legalPage(name string) http.HandlerFunc {
 	}
 }
 
-func probe(user, pass, captcha string) (string, error) {
+func probe(user, pass, captcha string, challenge *captchaChallenge) (string, *captchaChallenge, error) {
 	const origin = "https://ids.cqupt.edu.cn"
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	var client *http.Client
+	var fields map[string]string
+	if challenge != nil {
+		client, fields = challenge.client, challenge.fields
+	} else {
+		jar, _ := cookiejar.New(nil)
+		client = &http.Client{Jar: jar, Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	}
 	loginURL := origin + "/authserver/login"
-	resp, err := client.Get(loginURL)
-	if err != nil {
-		return "", err
+	if challenge == nil {
+		resp, err := client.Get(loginURL)
+		if err != nil {
+			return "", nil, err
+		}
+		page, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		resp.Body.Close()
+		if err != nil {
+			return "", nil, err
+		}
+		fields = parseCASForm(string(page))
 	}
-	defer resp.Body.Close()
-	page, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return "", err
-	}
-	pageHTML := string(page)
-	fields := parseCASForm(pageHTML)
 	salt := fields["pwdEncryptSalt"]
 	execution := fields["execution"]
 	eventID := fields["_eventId"]
 	cllt := fields["cllt"]
 	dllt := fields["dllt"]
 	if salt == "" || execution == "" || eventID == "" {
-		return "", fmt.Errorf("CAS login form fields missing")
+		return "", nil, fmt.Errorf("CAS login form fields missing")
 	}
-	check, err := client.Get(origin + "/authserver/checkNeedCaptcha.htl?username=" + url.QueryEscape(user))
-	if err != nil {
-		return "", err
-	}
-	var need struct {
-		IsNeed bool `json:"isNeed"`
-	}
-	err = json.NewDecoder(check.Body).Decode(&need)
-	check.Body.Close()
-	if err != nil {
-		return "", err
-	}
-	if need.IsNeed && strings.TrimSpace(captcha) == "" {
-		return "captcha-required", nil
+	if challenge == nil {
+		check, err := client.Get(origin + "/authserver/checkNeedCaptcha.htl?username=" + url.QueryEscape(user))
+		if err != nil {
+			return "", nil, err
+		}
+		var need struct {
+			IsNeed bool `json:"isNeed"`
+		}
+		err = json.NewDecoder(check.Body).Decode(&need)
+		check.Body.Close()
+		if err != nil {
+			return "", nil, err
+		}
+		if need.IsNeed {
+			imageResp, err := client.Get(origin + "/authserver/getCaptcha.htl?_=" + strconv.FormatInt(time.Now().UnixMilli(), 10))
+			if err != nil {
+				return "", nil, err
+			}
+			imageType := strings.ToLower(strings.TrimSpace(strings.Split(imageResp.Header.Get("Content-Type"), ";")[0]))
+			image, readErr := io.ReadAll(io.LimitReader(imageResp.Body, 1<<20+1))
+			imageResp.Body.Close()
+			if readErr != nil {
+				return "", nil, readErr
+			}
+			if imageResp.StatusCode != http.StatusOK || len(image) == 0 || len(image) > 1<<20 || (imageType != "image/png" && imageType != "image/jpeg" && imageType != "image/gif" && imageType != "image/webp") {
+				return "", nil, fmt.Errorf("CAS captcha image unavailable")
+			}
+			pending := &captchaChallenge{username: user, client: client, fields: fields, image: "data:" + imageType + ";base64," + base64.StdEncoding.EncodeToString(image), expires: time.Now().Add(3 * time.Minute)}
+			return "captcha-required", pending, nil
+		}
 	}
 	encrypted, err := encryptCASPassword(pass, salt)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if cllt == "" {
 		cllt = "userNameLogin"
@@ -446,9 +499,9 @@ func probe(user, pass, captcha string) (string, error) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for hop := 0; hop < 8; hop++ {
 		location := resp.Header.Get("Location")
@@ -462,38 +515,38 @@ func probe(user, pass, captcha string) (string, error) {
 				log.Printf("CQUPT probe response body: %s", compactProbeBody(string(body)))
 			}
 			if resp.StatusCode == http.StatusUnauthorized || loginPage {
-				return "credentials-incorrect", nil
+				return "credentials-incorrect", nil, nil
 			}
 			if finalPath == "/personalInfo/personCenter/index.html" || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
-				return "credentials-correct", nil
+				return "credentials-correct", nil, nil
 			}
-			return "login-unconfirmed", nil
+			return "login-unconfirmed", nil, nil
 		}
 		log.Printf("CQUPT probe redirect: status=%d from=%s location=%s", resp.StatusCode, resp.Request.URL.String(), location)
 		resp.Body.Close()
 		next, parseErr := url.Parse(location)
 		if parseErr != nil {
-			return "", parseErr
+			return "", nil, parseErr
 		}
 		if !next.IsAbs() {
 			next = resp.Request.URL.ResolveReference(next)
 		}
 		if next.Scheme != "https" || next.Hostname() != "ids.cqupt.edu.cn" || (next.Port() != "" && next.Port() != "443") {
-			return "login-unconfirmed", nil
+			return "login-unconfirmed", nil, nil
 		}
 		redirectReq, reqErr := http.NewRequest(http.MethodGet, next.String(), nil)
 		if reqErr != nil {
-			return "", reqErr
+			return "", nil, reqErr
 		}
 		redirectReq.Header.Set("Referer", resp.Request.URL.String())
 		redirectReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
 		resp, err = client.Do(redirectReq)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	resp.Body.Close()
-	return "login-unconfirmed", nil
+	return "login-unconfirmed", nil, nil
 }
 
 func compactProbeBody(s string) string {
