@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
-import { Dialog } from '@/components/ui/dialog'
+import { Dialog, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
@@ -117,8 +117,8 @@ export default function LoginPage() {
           </div>
           <form className="grid gap-4" onSubmit={submit}>
             {mode === 'register' && <>
-              {field('重邮统一账号', 'studentId', { required: true, inputMode: 'numeric', pattern: '[0-9]+', placeholder: '学号 / 工号' })}
-              {field('统一账号密码', 'studentPassword', { required: true, type: 'password', placeholder: '统一身份认证密码' })}
+              {field('重邮统一账号', 'studentId', { required: true, inputMode: 'numeric', pattern: '[0-9]+', placeholder: '统一验证号码，非学号' })}
+              {field('统一账号密码', 'studentPassword', { required: true, type: 'password', placeholder: '统一身份认证密码，仅作验证，不会保存' })}
             </>}
             {field('本站用户名', 'username', { required: true, pattern: '[A-Za-z0-9]+', placeholder: '英文和数字' })}
             {field('本站密码', 'password', { required: true, minLength: 6, type: 'password', placeholder: '至少 6 位' })}
@@ -128,7 +128,8 @@ export default function LoginPage() {
           {(legal.tos || legal.privacy) && <p className="mt-4 text-center text-xs text-muted-foreground">继续即表示同意 {legal.tos && <a className="underline" href="/tos.html" target="_blank">用户协议</a>}{legal.tos && legal.privacy ? ' 和 ' : ''}{legal.privacy && <a className="underline" href="/privacy.html" target="_blank">隐私政策</a>}</p>}
         </section>
       </div>
-      <Dialog isOpen={challenge !== null} onOpenChange={open => { if (!open && !busy) setChallenge(null) }} title="统一认证验证码">
+      <Dialog isOpen={challenge !== null} onOpenChange={open => { if (!open && !busy) setChallenge(null) }} isDismissable={!busy}>
+        <DialogHeader><DialogTitle>统一认证验证码</DialogTitle></DialogHeader>
         <form className="grid gap-4" onSubmit={submitCaptcha}>
           <img src={challenge?.captchaImage} alt="统一认证验证码" className="h-20 w-full rounded-md border bg-white object-contain" />
           <div className="grid gap-2">
