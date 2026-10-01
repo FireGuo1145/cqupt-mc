@@ -18,6 +18,7 @@ Environment variables:
 
 - `DB_DRIVER=sqlite|mysql` and `DB_DSN` (for MySQL, for example `user:pass@tcp(127.0.0.1:3306)/mc?parseTime=true`)
 - `ADDR` (default `:8080`), `SITE_NAME`, `ADMIN_STUDENT_ID`
+- `TRUSTED_PROXY_CIDRS` (optional, comma-separated proxy IPs/CIDRs; forwarded client IPs are ignored unless the direct peer matches one of these ranges)
 
 Registration validates the numeric CQUPT unified account through the Go native CAS probe, then stores a separate site username and password. Launcher clients should POST the site credentials to `/api/launcher/login`.
 

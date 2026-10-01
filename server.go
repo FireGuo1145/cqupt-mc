@@ -49,6 +49,7 @@ type app struct {
 	driver, site string
 	adminStudent string
 	tokens       map[string]string
+	tokensMu     sync.RWMutex
 	signatureKey string
 	signingKey   *rsa.PrivateKey
 	tokenTTL     time.Duration
@@ -208,8 +209,17 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           withCORS(withRequestBodyLimit(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, withCORS(mux)))
+	log.Fatal(server.ListenAndServe())
 }
 
 // loadDotEnv provides a small dependency-free .env loader. Existing process
@@ -344,7 +354,7 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := randomToken()
-	a.tokens[token] = in.Username
+	a.setCachedToken(token, in.Username)
 	_ = a.saveToken(token, token, in.Username)
 	jsonOK(w, map[string]any{"ok": true, "username": in.Username, "accessToken": token, "clientToken": token, "launcher": r.URL.Path == "/api/launcher/login"})
 }
@@ -685,6 +695,22 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.WriteHeader(code)
 	jsonOK(w, map[string]any{"error": msg})
 }
+func withRequestBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			limit := int64(1 << 20)
+			if r.URL.Path == "/api/skin" && r.Method == http.MethodPost {
+				limit = 5 << 20
+			}
+			if r.ContentLength > limit {
+				jsonError(w, "请求体过大", http.StatusRequestEntityTooLarge)
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -704,15 +730,30 @@ func getenv(k, fallback string) string {
 	return fallback
 }
 func randomToken() string { b := make([]byte, 24); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+func (a *app) setCachedToken(token, username string) {
+	a.tokensMu.Lock()
+	defer a.tokensMu.Unlock()
+	a.tokens[token] = username
+}
+func (a *app) cachedToken(token string) string {
+	a.tokensMu.RLock()
+	defer a.tokensMu.RUnlock()
+	return a.tokens[token]
+}
+func (a *app) deleteCachedToken(token string) {
+	a.tokensMu.Lock()
+	defer a.tokensMu.Unlock()
+	delete(a.tokens, token)
+}
 func (a *app) userFromToken(r *http.Request) string {
 	p := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if user := a.tokens[p]; user != "" {
+	if user := a.cachedToken(p); user != "" {
 		return user
 	}
 	var session Session
 	if a.gormDB.First(&session, "access_token = ?", p).Error == nil && time.Now().Before(session.ExpiresAt) {
 		user := session.Username
-		a.tokens[p] = user
+		a.setCachedToken(p, user)
 		return user
 	}
 	return ""
@@ -878,6 +919,10 @@ func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.limiter.Allow("ygg:authenticate:ip:"+clientIP(r), 10, time.Minute) {
+		rateLimitError(w, "登录请求过于频繁，请稍后再试")
+		return
+	}
 	var in yggLogin
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		jsonError(w, "无效请求", 400)
@@ -898,7 +943,7 @@ func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
 	if tok == "" {
 		tok = randomToken()
 	}
-	a.tokens[tok] = in.Username
+	a.setCachedToken(tok, in.Username)
 	_ = a.saveToken(tok, tok, in.Username)
 	profile := map[string]string{"id": profileID(in.Username), "name": in.Username}
 	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
@@ -933,7 +978,7 @@ func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
 		tok = in.AccessToken
 	}
 	username := a.tokenUser(in.AccessToken)
-	a.tokens[tok] = username
+	a.setCachedToken(tok, username)
 	_ = a.saveToken(tok, tok, username)
 	profile := map[string]string{"id": profileID(username), "name": username}
 	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
@@ -954,7 +999,7 @@ func (a *app) yggInvalidate(w http.ResponseWriter, r *http.Request) {
 		AccessToken string `json:"accessToken"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	delete(a.tokens, in.AccessToken)
+	a.deleteCachedToken(in.AccessToken)
 	_, _ = a.db.Exec("DELETE FROM sessions WHERE access_token=?", in.AccessToken)
 	w.WriteHeader(204)
 }
