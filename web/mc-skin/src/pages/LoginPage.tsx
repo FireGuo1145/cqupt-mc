@@ -37,18 +37,29 @@ export default function LoginPage() {
     setForm(previous => ({ ...previous, [key]: e.target.value }))
 
   async function sendRegistration(captchaAnswer = '', captchaToken = '') {
-    const response = await fetch('/api/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...form, captcha: captchaAnswer, captchaToken }),
-    })
-    const data = await response.json()
-    if (response.status === 428 && data.code === 'captcha-required') {
+    let response: Response
+    let data: { code?: string; captchaToken?: string; captchaImage?: string; error?: string }
+    try {
+      response = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, captcha: captchaAnswer, captchaToken }),
+      })
+      data = await response.json()
+    } catch (error) {
+      setForm(previous => ({ ...previous, studentPassword: '' }))
+      throw error
+    }
+    if (response.status === 428 && data.code === 'captcha-required' && data.captchaToken && data.captchaImage) {
       setCaptcha('')
       setChallenge({ captchaToken: data.captchaToken, captchaImage: data.captchaImage })
       return
     }
-    if (!response.ok) throw new Error(data.error || '注册失败')
+    if (!response.ok) {
+      setForm(previous => ({ ...previous, studentPassword: '' }))
+      throw new Error(data.error || '注册失败')
+    }
+    setForm(empty)
     setChallenge(null)
     setMode('login')
     setMessage('注册成功，请登录')
@@ -120,7 +131,7 @@ export default function LoginPage() {
             <form className="grid gap-4" onSubmit={submit}>
               {mode === 'register' && <>
                 {field('重邮统一账号', 'studentId', { required: true, inputMode: 'numeric', pattern: '[0-9]+', placeholder: '统一验证号码，非学号' })}
-                {field('统一账号密码', 'studentPassword', { required: true, type: 'password', placeholder: '统一身份认证密码，仅作验证，不会保存' })}
+                {field('统一账号密码', 'studentPassword', { required: true, type: 'password', autoComplete: 'off', placeholder: '统一身份认证密码，仅作验证，不会保存' })}
               </>}
               {field('本站用户名', 'username', { required: true, pattern: '[A-Za-z0-9]+', placeholder: '英文和数字' })}
               {field('本站密码', 'password', { required: true, minLength: 6, type: 'password', placeholder: '至少 6 位' })}
@@ -130,7 +141,16 @@ export default function LoginPage() {
             {(legal.tos || legal.privacy) && <p className="mt-4 text-center text-xs text-muted-foreground">继续即表示同意 {legal.tos && <a className="underline" href="/tos.html" target="_blank">用户协议</a>}{legal.tos && legal.privacy ? ' 和 ' : ''}{legal.privacy && <a className="underline" href="/privacy.html" target="_blank">隐私政策</a>}</p>}
           </section>
         </div>
-        <Dialog isOpen={challenge !== null} onOpenChange={open => { if (!open && !busy) setChallenge(null) }} isDismissable={!busy}>
+        <Dialog
+          isOpen={challenge !== null}
+          onOpenChange={open => {
+            if (!open && !busy) {
+              setChallenge(null)
+              setForm(previous => ({ ...previous, studentPassword: '' }))
+            }
+          }}
+          isDismissable={!busy}
+        >
           <DialogHeader><DialogTitle>统一认证验证码</DialogTitle></DialogHeader>
           <form className="grid gap-4" onSubmit={submitCaptcha}>
             <img src={challenge?.captchaImage} alt="统一认证验证码" className="h-20 w-full rounded-md border bg-white object-contain" />

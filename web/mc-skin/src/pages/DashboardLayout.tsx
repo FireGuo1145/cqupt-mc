@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, LogOut, Palette, Settings } from 'lucide-react'
+import { Flag, LayoutDashboard, LogOut, Palette, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import SiteFooter from '@/components/SiteFooter'
 import {
@@ -25,6 +25,7 @@ export default function DashboardLayout() {
   const links = [
     { to: '/dashboard', label: '概览', icon: LayoutDashboard },
     { to: '/skin', label: '我的皮肤', icon: Palette },
+    { to: '/cape', label: '我的披风', icon: Flag },
     { to: '/settings', label: '账号设置', icon: Settings },
   ]
 

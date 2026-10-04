@@ -17,7 +17,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -43,6 +45,8 @@ var frontend embed.FS
 var usernameRE = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 var studentRE = regexp.MustCompile(`^[0-9]+$`)
 
+const maxImageUploadBytes = 5 << 20
+
 type app struct {
 	db           *sql.DB
 	gormDB       *gorm.DB
@@ -61,7 +65,16 @@ type credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
-type registration struct{ StudentID, StudentPassword, Captcha, CaptchaToken, Username, Password string }
+
+// StudentPassword is used only for the upstream CAS check and is not part of User.
+type registration struct {
+	StudentID       string `json:"studentId"`
+	StudentPassword string `json:"studentPassword"`
+	Captcha         string `json:"captcha"`
+	CaptchaToken    string `json:"captchaToken"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+}
 type captchaChallenge struct {
 	username string
 	client   *http.Client
@@ -159,6 +172,8 @@ func main() {
 	mux.HandleFunc("/api/admin/delete", a.adminDelete)
 	mux.HandleFunc("/api/skin", a.skin)
 	mux.HandleFunc("/api/skin/", a.publicSkin)
+	mux.HandleFunc("/api/cape", a.cape)
+	mux.HandleFunc("/api/cape/", a.publicCape)
 	mux.HandleFunc("/textures/", a.texture)
 	mux.HandleFunc("/api/yggdrasil/textures/", a.texture)
 	mux.HandleFunc("/skins/MinecraftSkins/", a.legacySkin)
@@ -299,8 +314,8 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	}
 	status, pending, err := probe(in.StudentID, in.StudentPassword, in.Captcha, challenge)
 	if err != nil {
-		log.Printf("CQUPT probe error: %v", err)
-		jsonError(w, "统一认证服务暂时不可用: "+err.Error(), 502)
+		log.Printf("CQUPT probe failed")
+		jsonError(w, "统一认证服务暂时不可用", 502)
 		return
 	}
 	if status == "captcha-required" && pending != nil {
@@ -520,10 +535,7 @@ func probe(user, pass, captcha string, challenge *captchaChallenge) (string, *ca
 			resp.Body.Close()
 			finalPath := resp.Request.URL.Path
 			loginPage := strings.Contains(string(body), `id="pwdFromId"`) || strings.Contains(string(body), `name="passwordText"`)
-			log.Printf("CQUPT probe final response: status=%d url=%s loginPage=%t", resp.StatusCode, resp.Request.URL.String(), loginPage)
-			if resp.StatusCode >= 500 {
-				log.Printf("CQUPT probe response body: %s", compactProbeBody(string(body)))
-			}
+			log.Printf("CQUPT probe final response: status=%d loginPage=%t", resp.StatusCode, loginPage)
 			if resp.StatusCode == http.StatusUnauthorized || loginPage {
 				return "credentials-incorrect", nil, nil
 			}
@@ -532,7 +544,7 @@ func probe(user, pass, captcha string, challenge *captchaChallenge) (string, *ca
 			}
 			return "login-unconfirmed", nil, nil
 		}
-		log.Printf("CQUPT probe redirect: status=%d from=%s location=%s", resp.StatusCode, resp.Request.URL.String(), location)
+		log.Printf("CQUPT probe redirect: status=%d", resp.StatusCode)
 		resp.Body.Close()
 		next, parseErr := url.Parse(location)
 		if parseErr != nil {
@@ -557,15 +569,6 @@ func probe(user, pass, captcha string, challenge *captchaChallenge) (string, *ca
 	}
 	resp.Body.Close()
 	return "login-unconfirmed", nil, nil
-}
-
-func compactProbeBody(s string) string {
-	s = regexp.MustCompile(`<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>`).ReplaceAllString(s, " ")
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 600 {
-		return s[:600]
-	}
-	return s
 }
 
 func matchInput(html, id string) string {
@@ -699,8 +702,8 @@ func withRequestBodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			limit := int64(1 << 20)
-			if r.URL.Path == "/api/skin" && r.Method == http.MethodPost {
-				limit = 5 << 20
+			if (r.URL.Path == "/api/skin" || r.URL.Path == "/api/cape") && r.Method == http.MethodPost {
+				limit = maxImageUploadBytes
 			}
 			if r.ContentLength > limit {
 				jsonError(w, "请求体过大", http.StatusRequestEntityTooLarge)
@@ -840,7 +843,7 @@ func (a *app) skin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 5<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageUploadBytes)
 	b, e := io.ReadAll(r.Body)
 	if e != nil || len(b) == 0 {
 		jsonError(w, "皮肤文件无效", 400)
@@ -852,6 +855,57 @@ func (a *app) skin(w http.ResponseWriter, r *http.Request) {
 	}
 	if e = os.WriteFile("data/skins/"+user+".png", b, 0600); e != nil {
 		jsonError(w, "保存失败", 500)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+func (a *app) cape(w http.ResponseWriter, r *http.Request) {
+	username := a.userFromToken(r)
+	if username == "" {
+		jsonError(w, "未登录", http.StatusUnauthorized)
+		return
+	}
+	if !usernameRE.MatchString(username) {
+		jsonError(w, "账号名称无效", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxImageUploadBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonError(w, "披风文件不能超过 5 MiB", http.StatusRequestEntityTooLarge)
+		} else {
+			jsonError(w, "披风文件读取失败", http.StatusBadRequest)
+		}
+		return
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(body))
+	if err != nil || config.Width != 64 || config.Height != 32 {
+		jsonError(w, "披风必须是 64×32 像素的有效 PNG 图片", http.StatusBadRequest)
+		return
+	}
+	decoded, err := png.Decode(bytes.NewReader(body))
+	if err != nil {
+		jsonError(w, "披风 PNG 文件损坏", http.StatusBadRequest)
+		return
+	}
+	var normalized bytes.Buffer
+	if err = png.Encode(&normalized, decoded); err != nil {
+		jsonError(w, "披风图片处理失败", http.StatusBadRequest)
+		return
+	}
+	if err = os.MkdirAll("data/capes", 0750); err != nil {
+		jsonError(w, "创建披风目录失败", http.StatusInternalServerError)
+		return
+	}
+	if err = os.WriteFile("data/capes/"+username+".png", normalized.Bytes(), 0600); err != nil {
+		jsonError(w, "保存披风失败", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]any{"ok": true})
@@ -872,6 +926,22 @@ func (a *app) publicSkin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	_, _ = io.Copy(w, f)
 }
+func (a *app) publicCape(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimPrefix(r.URL.Path, "/api/cape/")
+	if username == "" || !usernameRE.MatchString(username) {
+		http.NotFound(w, r)
+		return
+	}
+	b, err := os.ReadFile("data/capes/" + username + ".png")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	_, _ = w.Write(b)
+}
 func (a *app) legacySkin(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skins/MinecraftSkins/"), ".png")
 	a.serveSkinByUser(w, username)
@@ -883,18 +953,22 @@ func (a *app) texture(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	entries, _ := os.ReadDir("data/skins")
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".png") {
-			continue
-		}
-		b, err := os.ReadFile("data/skins/" + entry.Name())
-		if err == nil {
-			sum := sha256.Sum256(b)
-			if hex.EncodeToString(sum[:]) == strings.ToLower(hash) {
-				w.Header().Set("Content-Type", "image/png")
-				_, _ = w.Write(b)
-				return
+	for _, directory := range []string{"skins", "capes"} {
+		entries, _ := os.ReadDir("data/" + directory)
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".png") {
+				continue
+			}
+			b, err := os.ReadFile("data/" + directory + "/" + entry.Name())
+			if err == nil {
+				sum := sha256.Sum256(b)
+				if hex.EncodeToString(sum[:]) == strings.ToLower(hash) {
+					w.Header().Set("Content-Type", "image/png")
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					w.Header().Set("X-Content-Type-Options", "nosniff")
+					_, _ = w.Write(b)
+					return
+				}
 			}
 		}
 	}
@@ -1066,6 +1140,11 @@ func (a *app) profileResponse(r *http.Request, username string) map[string]any {
 		sum := sha256.Sum256(skin)
 		textureMap["SKIN"] = map[string]string{"url": base + "/api/yggdrasil/textures/" + hex.EncodeToString(sum[:])}
 	}
+	cape, capeErr := os.ReadFile("data/capes/" + username + ".png")
+	if capeErr == nil && len(cape) > 0 {
+		sum := sha256.Sum256(cape)
+		textureMap["CAPE"] = map[string]string{"url": base + "/api/yggdrasil/textures/" + hex.EncodeToString(sum[:])}
+	}
 	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": textureMap}
 	b, _ := json.Marshal(textures)
 	value := base64.StdEncoding.EncodeToString(b)
@@ -1076,7 +1155,7 @@ func (a *app) profileResponse(r *http.Request, username string) map[string]any {
 			property["signature"] = base64.StdEncoding.EncodeToString(signature)
 		}
 	}
-	return map[string]any{"id": profileID(username), "name": username, "properties": []any{property, map[string]string{"name": "uploadableTextures", "value": "skin"}}}
+	return map[string]any{"id": profileID(username), "name": username, "properties": []any{property, map[string]string{"name": "uploadableTextures", "value": "skin,cape"}}}
 }
 
 func loadSigningKey(path string) (*rsa.PrivateKey, error) {
