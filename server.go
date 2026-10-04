@@ -45,7 +45,11 @@ var frontend embed.FS
 var usernameRE = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 var studentRE = regexp.MustCompile(`^[0-9]+$`)
 
-const maxImageUploadBytes = 5 << 20
+const (
+	maxImageUploadBytes              = 5 << 20
+	yggdrasilAPIRootPath             = "/api/yggdrasil/"
+	authlibInjectorAPILocationHeader = "X-Authlib-Injector-API-Location"
+)
 
 type app struct {
 	db           *sql.DB
@@ -718,6 +722,9 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Expose-Headers", authlibInjectorAPILocationHeader)
+		w.Header().Set(authlibInjectorAPILocationHeader, yggdrasilAPIRootPath)
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
 			return
@@ -1032,8 +1039,6 @@ func (a *app) yggMetadata(w http.ResponseWriter, r *http.Request) {
 		base = proto + "://" + r.Host
 	}
 	host := strings.Split(r.Host, ":")[0]
-	_ = base
-	w.Header().Set("X-Authlib-Injector-API-Location", "/api/yggdrasil/")
 	jsonOK(w, map[string]any{"meta": map[string]any{"serverName": a.site, "implementationName": a.site, "implementationVersion": "1.0.0", "feature.non_email_login": true, "feature.legacy_skin_api": true, "links": map[string]string{"homepage": base + "/", "register": base + "/login"}}, "skinDomains": []string{host}, "signaturePublickey": a.signatureKey})
 }
 func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {

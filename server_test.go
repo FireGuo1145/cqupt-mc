@@ -181,3 +181,33 @@ func TestProfileResponseIncludesCapeTexture(t *testing.T) {
 		t.Fatalf("hashed cape texture status = %d, url = %s", textureResponse.Code, capeTexture["url"])
 	}
 }
+
+func TestAPILocationDiscoveryHeaderIsGlobal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := withCORS(mux)
+
+	for _, path := range []string{"/", "/api/health", "/api/yggdrasil/", "/missing"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if got := resp.Header().Get(authlibInjectorAPILocationHeader); got != yggdrasilAPIRootPath {
+			t.Errorf("%s discovery header = %q, want %q", path, got, yggdrasilAPIRootPath)
+		}
+		if got := resp.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, authlibInjectorAPILocationHeader) {
+			t.Errorf("%s does not expose the discovery header to browser clients: %q", path, got)
+		}
+	}
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/yggdrasil/", nil)
+	preflightResponse := httptest.NewRecorder()
+	handler.ServeHTTP(preflightResponse, preflight)
+	if preflightResponse.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d, want %d", preflightResponse.Code, http.StatusNoContent)
+	}
+	if got := preflightResponse.Header().Get(authlibInjectorAPILocationHeader); got != yggdrasilAPIRootPath {
+		t.Fatalf("OPTIONS discovery header = %q, want %q", got, yggdrasilAPIRootPath)
+	}
+}
