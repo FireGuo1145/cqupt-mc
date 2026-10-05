@@ -82,7 +82,7 @@ export default function CapePage() {
         <div className="space-y-4">
           <h2 className="text-xl font-semibold">披风纹理</h2>
           <p className="text-sm text-muted-foreground">
-            上传 64×32 像素的 PNG 披风纹理，文件最大 5 MiB。再次上传会替换当前披风。
+            上传符合 Minecraft 规范的 PNG 披风纹理（64×32 系列或旧式 22×17 系列），文件最大 5 MiB；旧式尺寸会由服务端透明补齐。再次上传会替换当前披风。
             上传后，兼容本站 Yggdrasil 的启动器可在重新登录或刷新角色后显示披风。
           </p>
           <p className="text-sm font-medium">状态：{capeUrl ? '已上传' : '待上传'}</p>

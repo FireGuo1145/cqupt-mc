@@ -2,12 +2,10 @@ package main
 
 import (
 	"bytes"
-	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -17,9 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -47,6 +43,7 @@ var studentRE = regexp.MustCompile(`^[0-9]+$`)
 
 const (
 	maxImageUploadBytes              = 5 << 20
+	maxTextureUploadBodyBytes        = maxImageUploadBytes + (64 << 10)
 	yggdrasilAPIRootPath             = "/api/yggdrasil/"
 	authlibInjectorAPILocationHeader = "X-Authlib-Injector-API-Location"
 )
@@ -58,12 +55,15 @@ type app struct {
 	adminStudent string
 	tokens       map[string]string
 	tokensMu     sync.RWMutex
+	refreshMu    sync.Mutex
 	signatureKey string
 	signingKey   *rsa.PrivateKey
 	tokenTTL     time.Duration
 	limiter      *RateLimiter
 	challengeMu  sync.Mutex
 	challenges   map[string]*captchaChallenge
+	joinedMu     sync.Mutex
+	joined       map[string]pendingJoin
 }
 type credentials struct {
 	Username string `json:"username"`
@@ -105,6 +105,12 @@ type Session struct {
 	ClientToken string    `gorm:"size:128;not null"`
 	Username    string    `gorm:"size:64;not null;index"`
 	ExpiresAt   time.Time `gorm:"index"`
+}
+
+type pendingJoin struct {
+	username  string
+	clientIP  string
+	expiresAt time.Time
 }
 
 func main() {
@@ -189,6 +195,8 @@ func main() {
 	mux.HandleFunc("/authserver/validate/", a.yggValidate)
 	mux.HandleFunc("/authserver/invalidate", a.yggInvalidate)
 	mux.HandleFunc("/authserver/invalidate/", a.yggInvalidate)
+	mux.HandleFunc("/authserver/signout", a.yggSignout)
+	mux.HandleFunc("/authserver/signout/", a.yggSignout)
 	mux.HandleFunc("/sessionserver/session/minecraft/join", a.yggJoin)
 	mux.HandleFunc("/sessionserver/session/minecraft/hasJoined", a.yggHasJoined)
 	mux.HandleFunc("/sessionserver/session/minecraft/profile/", a.yggProfile)
@@ -201,9 +209,14 @@ func main() {
 	mux.HandleFunc("/api/yggdrasil/authserver/refresh", a.yggRefresh)
 	mux.HandleFunc("/api/yggdrasil/authserver/validate", a.yggValidate)
 	mux.HandleFunc("/api/yggdrasil/authserver/invalidate", a.yggInvalidate)
+	mux.HandleFunc("/api/yggdrasil/authserver/signout", a.yggSignout)
 	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/join", a.yggJoin)
 	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/hasJoined", a.yggHasJoined)
 	mux.HandleFunc("/api/yggdrasil/sessionserver/session/minecraft/profile/", a.yggProfile)
+	mux.HandleFunc("/api/profiles/minecraft", a.handleYggBatchProfiles)
+	mux.HandleFunc("/api/yggdrasil/api/profiles/minecraft", a.handleYggBatchProfiles)
+	mux.HandleFunc("/api/user/profile/", a.handleYggTextureUpload)
+	mux.HandleFunc("/api/yggdrasil/api/user/profile/", a.handleYggTextureUpload)
 	static, _ := fs.Sub(frontend, "web/mc-skin/dist")
 	fileServer := http.FileServer(http.FS(static))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -709,6 +722,9 @@ func withRequestBodyLimit(next http.Handler) http.Handler {
 			if (r.URL.Path == "/api/skin" || r.URL.Path == "/api/cape") && r.Method == http.MethodPost {
 				limit = maxImageUploadBytes
 			}
+			if (strings.HasPrefix(r.URL.Path, "/api/user/profile/") || strings.HasPrefix(r.URL.Path, "/api/yggdrasil/api/user/profile/")) && r.Method == http.MethodPut {
+				limit = maxTextureUploadBodyBytes
+			}
 			if r.ContentLength > limit {
 				jsonError(w, "请求体过大", http.StatusRequestEntityTooLarge)
 				return
@@ -721,8 +737,8 @@ func withRequestBodyLimit(next http.Handler) http.Handler {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Expose-Headers", authlibInjectorAPILocationHeader)
 		w.Header().Set(authlibInjectorAPILocationHeader, yggdrasilAPIRootPath)
 		if r.Method == "OPTIONS" {
@@ -756,27 +772,18 @@ func (a *app) deleteCachedToken(token string) {
 	delete(a.tokens, token)
 }
 func (a *app) userFromToken(r *http.Request) string {
-	p := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if user := a.cachedToken(p); user != "" {
-		return user
-	}
-	var session Session
-	if a.gormDB.First(&session, "access_token = ?", p).Error == nil && time.Now().Before(session.ExpiresAt) {
-		user := session.Username
-		a.setCachedToken(p, user)
-		return user
-	}
-	return ""
+	p := bearerToken(r)
+	return a.tokenUser(p)
 }
 func (a *app) saveToken(access, client, username string) error {
 	return a.gormDB.Save(&Session{AccessToken: access, ClientToken: client, Username: username, ExpiresAt: time.Now().Add(a.tokenTTL)}).Error
 }
 func (a *app) tokenUser(access string) string {
-	var session Session
-	if a.gormDB.First(&session, "access_token = ?", access).Error == nil && time.Now().Before(session.ExpiresAt) {
-		return session.Username
+	session, ok := a.loadSession(access)
+	if !ok {
+		return ""
 	}
-	return ""
+	return session.Username
 }
 func (a *app) isAdmin(username string) bool {
 	if username == "" {
@@ -829,93 +836,11 @@ func (a *app) adminMutation(w http.ResponseWriter, r *http.Request, q string) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 func (a *app) skin(w http.ResponseWriter, r *http.Request) {
-	user := a.userFromToken(r)
-	if user == "" {
-		jsonError(w, "未登录", 401)
-		return
-	}
-	os.MkdirAll("data/skins", 0750)
-	if r.Method == http.MethodGet {
-		f, e := os.Open("data/skins/" + user + ".png")
-		if e != nil {
-			http.NotFound(w, r)
-			return
-		}
-		defer f.Close()
-		w.Header().Set("Content-Type", "image/png")
-		io.Copy(w, f)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxImageUploadBytes)
-	b, e := io.ReadAll(r.Body)
-	if e != nil || len(b) == 0 {
-		jsonError(w, "皮肤文件无效", 400)
-		return
-	}
-	if len(b) < 8 || string(b[:8]) != "\x89PNG\r\n\x1a\n" {
-		jsonError(w, "仅支持 PNG 皮肤", 400)
-		return
-	}
-	if e = os.WriteFile("data/skins/"+user+".png", b, 0600); e != nil {
-		jsonError(w, "保存失败", 500)
-		return
-	}
-	jsonOK(w, map[string]any{"ok": true})
+	a.handleCustomSkin(w, r)
 }
 
 func (a *app) cape(w http.ResponseWriter, r *http.Request) {
-	username := a.userFromToken(r)
-	if username == "" {
-		jsonError(w, "未登录", http.StatusUnauthorized)
-		return
-	}
-	if !usernameRE.MatchString(username) {
-		jsonError(w, "账号名称无效", http.StatusForbidden)
-		return
-	}
-	if r.Method != http.MethodPost {
-		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxImageUploadBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			jsonError(w, "披风文件不能超过 5 MiB", http.StatusRequestEntityTooLarge)
-		} else {
-			jsonError(w, "披风文件读取失败", http.StatusBadRequest)
-		}
-		return
-	}
-	config, err := png.DecodeConfig(bytes.NewReader(body))
-	if err != nil || config.Width != 64 || config.Height != 32 {
-		jsonError(w, "披风必须是 64×32 像素的有效 PNG 图片", http.StatusBadRequest)
-		return
-	}
-	decoded, err := png.Decode(bytes.NewReader(body))
-	if err != nil {
-		jsonError(w, "披风 PNG 文件损坏", http.StatusBadRequest)
-		return
-	}
-	var normalized bytes.Buffer
-	if err = png.Encode(&normalized, decoded); err != nil {
-		jsonError(w, "披风图片处理失败", http.StatusBadRequest)
-		return
-	}
-	if err = os.MkdirAll("data/capes", 0750); err != nil {
-		jsonError(w, "创建披风目录失败", http.StatusInternalServerError)
-		return
-	}
-	if err = os.WriteFile("data/capes/"+username+".png", normalized.Bytes(), 0600); err != nil {
-		jsonError(w, "保存披风失败", http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]any{"ok": true})
+	a.handleCustomCape(w, r)
 }
 
 func (a *app) publicSkin(w http.ResponseWriter, r *http.Request) {
@@ -924,14 +849,14 @@ func (a *app) publicSkin(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := os.Open("data/skins/" + username + ".png")
+	body, err := readSafeTexturePNG("data/skins", username, "skin")
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	defer f.Close()
 	w.Header().Set("Content-Type", "image/png")
-	_, _ = io.Copy(w, f)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(body)
 }
 func (a *app) publicCape(w http.ResponseWriter, r *http.Request) {
 	username := strings.TrimPrefix(r.URL.Path, "/api/cape/")
@@ -939,7 +864,7 @@ func (a *app) publicCape(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	b, err := os.ReadFile("data/capes/" + username + ".png")
+	b, err := readSafeTexturePNG("data/capes", username, "cape")
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -966,7 +891,9 @@ func (a *app) texture(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasSuffix(entry.Name(), ".png") {
 				continue
 			}
-			b, err := os.ReadFile("data/" + directory + "/" + entry.Name())
+			username := strings.TrimSuffix(entry.Name(), ".png")
+			kind := strings.TrimSuffix(directory, "s")
+			b, err := readSafeTexturePNG("data/"+directory, username, kind)
 			if err == nil {
 				sum := sha256.Sum256(b)
 				if hex.EncodeToString(sum[:]) == strings.ToLower(hash) {
@@ -986,7 +913,7 @@ func (a *app) serveSkinByUser(w http.ResponseWriter, username string) {
 		http.NotFound(w, nil)
 		return
 	}
-	b, err := os.ReadFile("data/skins/" + username + ".png")
+	b, err := readSafeTexturePNG("data/skins", username, "skin")
 	if err != nil {
 		http.NotFound(w, nil)
 		return
@@ -996,42 +923,7 @@ func (a *app) serveSkinByUser(w http.ResponseWriter, username string) {
 }
 
 func (a *app) yggAuthenticate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonError(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.limiter.Allow("ygg:authenticate:ip:"+clientIP(r), 10, time.Minute) {
-		rateLimitError(w, "登录请求过于频繁，请稍后再试")
-		return
-	}
-	var in yggLogin
-	if json.NewDecoder(r.Body).Decode(&in) != nil {
-		jsonError(w, "无效请求", 400)
-		return
-	}
-	var stored string
-	var banned int
-	if a.db.QueryRow("SELECT password_hash,banned FROM users WHERE username=?", in.Username).Scan(&stored, &banned) != nil || banned != 0 {
-		jsonError(w, "Forbidden", 403)
-		return
-	}
-	ok, _ := verifyPassword(stored, in.Password)
-	if !ok {
-		jsonError(w, "Forbidden", 403)
-		return
-	}
-	tok := in.ClientToken
-	if tok == "" {
-		tok = randomToken()
-	}
-	a.setCachedToken(tok, in.Username)
-	_ = a.saveToken(tok, tok, in.Username)
-	profile := map[string]string{"id": profileID(in.Username), "name": in.Username}
-	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
-	if in.RequestUser {
-		result["user"] = map[string]any{"id": profile["id"], "properties": []any{}}
-	}
-	jsonOK(w, result)
+	a.handleYggAuthenticate(w, r)
 }
 func (a *app) yggMetadata(w http.ResponseWriter, r *http.Request) {
 	base := "http://" + r.Host
@@ -1042,125 +934,29 @@ func (a *app) yggMetadata(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"meta": map[string]any{"serverName": a.site, "implementationName": a.site, "implementationVersion": "1.0.0", "feature.non_email_login": true, "feature.legacy_skin_api": true, "links": map[string]string{"homepage": base + "/", "register": base + "/login"}}, "skinDomains": []string{host}, "signaturePublickey": a.signatureKey})
 }
 func (a *app) yggRefresh(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AccessToken     string            `json:"accessToken"`
-		ClientToken     string            `json:"clientToken"`
-		SelectedProfile map[string]string `json:"selectedProfile"`
-		RequestUser     bool              `json:"requestUser"`
-	}
-	if json.NewDecoder(r.Body).Decode(&in) != nil || a.tokenUser(in.AccessToken) == "" {
-		jsonError(w, "Forbidden", 403)
-		return
-	}
-	tok := in.ClientToken
-	if tok == "" {
-		tok = in.AccessToken
-	}
-	username := a.tokenUser(in.AccessToken)
-	a.setCachedToken(tok, username)
-	_ = a.saveToken(tok, tok, username)
-	profile := map[string]string{"id": profileID(username), "name": username}
-	result := map[string]any{"accessToken": tok, "clientToken": tok, "selectedProfile": profile, "availableProfiles": []any{profile}}
-	if in.RequestUser {
-		result["user"] = map[string]any{"id": profile["id"], "properties": []any{}}
-	}
-	jsonOK(w, result)
+	a.handleYggRefresh(w, r)
 }
 func (a *app) yggValidate(w http.ResponseWriter, r *http.Request) {
-	if a.userFromToken(r) != "" {
-		w.WriteHeader(204)
-	} else {
-		w.WriteHeader(403)
-	}
+	a.handleYggValidate(w, r)
 }
 func (a *app) yggInvalidate(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AccessToken string `json:"accessToken"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	a.deleteCachedToken(in.AccessToken)
-	_, _ = a.db.Exec("DELETE FROM sessions WHERE access_token=?", in.AccessToken)
-	w.WriteHeader(204)
+	a.handleYggInvalidate(w, r)
+}
+func (a *app) yggSignout(w http.ResponseWriter, r *http.Request) {
+	a.handleYggSignout(w, r)
 }
 func (a *app) yggJoin(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		AccessToken     string `json:"accessToken"`
-		SelectedProfile string `json:"selectedProfile"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	if a.tokenUser(in.AccessToken) == "" {
-		jsonError(w, "Forbidden", 403)
-		return
-	}
-	w.WriteHeader(204)
+	a.handleYggJoin(w, r)
 }
 func (a *app) yggHasJoined(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("username") == "" {
-		http.NotFound(w, r)
-		return
-	}
-	var sid string
-	if a.db.QueryRow("SELECT username FROM users WHERE username=?", r.URL.Query().Get("username")).Scan(&sid) != nil {
-		http.NotFound(w, r)
-		return
-	}
-	jsonOK(w, a.profileResponse(r, sid))
+	a.handleYggHasJoined(w, r)
 }
 func (a *app) yggProfile(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/sessionserver/session/minecraft/profile/")
-	name = strings.TrimPrefix(name, "/api/yggdrasil/sessionserver/session/minecraft/profile/")
-	if name == "" {
-		http.NotFound(w, r)
-		return
-	}
-	var u string
-	if a.db.QueryRow("SELECT username FROM users WHERE username=?", name).Scan(&u) != nil {
-		rows, _ := a.db.Query("SELECT username FROM users")
-		if rows != nil {
-			defer rows.Close()
-			for rows.Next() {
-				var candidate string
-				if rows.Scan(&candidate) == nil && profileID(candidate) == name {
-					u = candidate
-					break
-				}
-			}
-		}
-	}
-	if u == "" {
-		http.NotFound(w, r)
-		return
-	}
-	jsonOK(w, a.profileResponse(r, u))
+	a.handleYggProfile(w, r)
 }
 func profileID(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:])[:32] }
 func (a *app) profileResponse(r *http.Request, username string) map[string]any {
-	base := "http://" + r.Host
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		base = proto + "://" + r.Host
-	}
-	skin, skinErr := os.ReadFile("data/skins/" + username + ".png")
-	textureMap := map[string]any{}
-	if skinErr == nil && len(skin) > 0 {
-		sum := sha256.Sum256(skin)
-		textureMap["SKIN"] = map[string]string{"url": base + "/api/yggdrasil/textures/" + hex.EncodeToString(sum[:])}
-	}
-	cape, capeErr := os.ReadFile("data/capes/" + username + ".png")
-	if capeErr == nil && len(cape) > 0 {
-		sum := sha256.Sum256(cape)
-		textureMap["CAPE"] = map[string]string{"url": base + "/api/yggdrasil/textures/" + hex.EncodeToString(sum[:])}
-	}
-	textures := map[string]any{"timestamp": time.Now().UnixMilli(), "profileId": profileID(username), "profileName": username, "textures": textureMap}
-	b, _ := json.Marshal(textures)
-	value := base64.StdEncoding.EncodeToString(b)
-	property := map[string]string{"name": "textures", "value": value}
-	digest := sha1.Sum([]byte(value))
-	if a.signingKey != nil {
-		if signature, err := rsa.SignPKCS1v15(rand.Reader, a.signingKey, crypto.SHA1, digest[:]); err == nil {
-			property["signature"] = base64.StdEncoding.EncodeToString(signature)
-		}
-	}
-	return map[string]any{"id": profileID(username), "name": username, "properties": []any{property, map[string]string{"name": "uploadableTextures", "value": "skin,cape"}}}
+	return a.profilePayload(r, username, true)
 }
 
 func loadSigningKey(path string) (*rsa.PrivateKey, error) {

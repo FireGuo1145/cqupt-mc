@@ -99,6 +99,26 @@ func TestRequestBodyLimitRejectsOversizedDeclaredBody(t *testing.T) {
 	}
 }
 
+func TestRequestBodyLimitAllowsMultipartOverheadForTextureUpload(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPut, "/api/user/profile/0123456789abcdef0123456789abcdef/skin", strings.NewReader(strings.Repeat("x", maxTextureUploadBodyBytes)))
+	recorder := httptest.NewRecorder()
+	handlerCalled := false
+	handler := withRequestBodyLimit(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handlerCalled = true
+	}))
+	handler.ServeHTTP(recorder, request)
+	if !handlerCalled {
+		t.Fatalf("standard texture upload at the request limit was rejected: status=%d", recorder.Code)
+	}
+
+	tooLarge := httptest.NewRequest(http.MethodPut, "/api/user/profile/0123456789abcdef0123456789abcdef/skin", strings.NewReader(strings.Repeat("x", maxTextureUploadBodyBytes+1)))
+	tooLargeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(tooLargeRecorder, tooLarge)
+	if tooLargeRecorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized standard texture upload status = %d, want 413", tooLargeRecorder.Code)
+	}
+}
+
 func testPNG(t *testing.T, width, height int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -110,10 +130,11 @@ func testPNG(t *testing.T, width, height int) []byte {
 
 func TestCapeUploadValidatesAndPubliclyServesCape(t *testing.T) {
 	t.Chdir(t.TempDir())
-	a := &app{tokens: make(map[string]string)}
-	a.setCachedToken("test-token", "CapePlayer")
+	a := newProtocolTestApp(t)
+	addProtocolTestUser(t, a, "CapePlayer", "secret")
+	addProtocolTestSession(t, a, "test-token", "client-token", "CapePlayer")
 
-	badRequest := httptest.NewRequest(http.MethodPost, "/api/cape", bytes.NewReader(testPNG(t, 128, 64)))
+	badRequest := httptest.NewRequest(http.MethodPost, "/api/cape", bytes.NewReader(testPNG(t, 65, 31)))
 	badRequest.Header.Set("Authorization", "Bearer test-token")
 	badResponse := httptest.NewRecorder()
 	a.cape(badResponse, badRequest)
@@ -206,6 +227,12 @@ func TestAPILocationDiscoveryHeaderIsGlobal(t *testing.T) {
 	handler.ServeHTTP(preflightResponse, preflight)
 	if preflightResponse.Code != http.StatusNoContent {
 		t.Fatalf("OPTIONS status = %d, want %d", preflightResponse.Code, http.StatusNoContent)
+	}
+	if got := preflightResponse.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "authorization") {
+		t.Fatalf("OPTIONS does not allow Authorization: %q", got)
+	}
+	if got := preflightResponse.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "PUT") || !strings.Contains(got, "DELETE") {
+		t.Fatalf("OPTIONS does not allow texture upload methods: %q", got)
 	}
 	if got := preflightResponse.Header().Get(authlibInjectorAPILocationHeader); got != yggdrasilAPIRootPath {
 		t.Fatalf("OPTIONS discovery header = %q, want %q", got, yggdrasilAPIRootPath)
