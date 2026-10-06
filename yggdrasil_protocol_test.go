@@ -34,16 +34,17 @@ func newProtocolTestApp(t *testing.T) *app {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	if err = gdb.AutoMigrate(&User{}, &Session{}); err != nil {
+	if err = gdb.AutoMigrate(&User{}, &Session{}, &ManualRegistration{}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &app{
-		db:       db,
-		gormDB:   gdb,
-		tokens:   make(map[string]string),
-		tokenTTL: time.Hour,
-		limiter:  NewRateLimiter(),
+		db:         db,
+		gormDB:     gdb,
+		tokens:     make(map[string]string),
+		challenges: make(map[string]*captchaChallenge),
+		tokenTTL:   time.Hour,
+		limiter:    NewRateLimiter(),
 	}
 }
 

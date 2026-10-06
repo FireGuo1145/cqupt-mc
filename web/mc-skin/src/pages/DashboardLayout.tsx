@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Flag, LayoutDashboard, LogOut, Palette, Settings } from 'lucide-react'
+import { Flag, LayoutDashboard, LogOut, Palette, Settings, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import SiteFooter from '@/components/SiteFooter'
 import {
@@ -18,6 +19,16 @@ import {
 export default function DashboardLayout() {
   const navigate = useNavigate()
   const location = useLocation()
+  const [isAdmin, setIsAdmin] = useState(false)
+
+  useEffect(() => {
+    const token = localStorage.getItem('mc_access_token')
+    if (!token) return
+    fetch('/api/admin/users', { headers: { Authorization: `Bearer ${token}` } })
+      .then(response => { if (response.ok) setIsAdmin(true) })
+      .catch(() => {})
+  }, [])
+
   const logout = () => {
     localStorage.clear()
     navigate('/login')
@@ -27,6 +38,7 @@ export default function DashboardLayout() {
     { to: '/skin', label: '我的皮肤', icon: Palette },
     { to: '/cape', label: '我的披风', icon: Flag },
     { to: '/settings', label: '账号设置', icon: Settings },
+    ...(isAdmin ? [{ to: '/admin', label: '管理员后台', icon: ShieldCheck }] : []),
   ]
 
   return (

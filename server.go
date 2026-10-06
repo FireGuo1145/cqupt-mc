@@ -62,6 +62,7 @@ type app struct {
 	limiter      *RateLimiter
 	challengeMu  sync.Mutex
 	challenges   map[string]*captchaChallenge
+	casProbe     func(string, string, string, *captchaChallenge) (string, *captchaChallenge, error)
 	joinedMu     sync.Mutex
 	joined       map[string]pendingJoin
 }
@@ -93,12 +94,13 @@ type yggLogin struct {
 	RequestUser bool   `json:"requestUser"`
 }
 type User struct {
-	ID           uint   `gorm:"primaryKey"`
-	StudentID    string `gorm:"uniqueIndex;size:64;not null"`
-	Username     string `gorm:"uniqueIndex;size:64;not null"`
-	PasswordHash string `gorm:"not null"`
-	Banned       bool
-	CreatedAt    time.Time
+	ID                  uint   `gorm:"primaryKey"`
+	StudentID           string `gorm:"uniqueIndex;size:64;not null"`
+	Username            string `gorm:"uniqueIndex;size:64;not null"`
+	PasswordHash        string `gorm:"not null"`
+	Banned              bool
+	CreatedAt           time.Time
+	LastPasswordResetAt *time.Time `gorm:"index"`
 }
 type Session struct {
 	AccessToken string    `gorm:"primaryKey;size:128"`
@@ -143,7 +145,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err = gdb.AutoMigrate(&User{}, &Session{}); err != nil {
+	if err = gdb.AutoMigrate(&User{}, &Session{}, &ManualRegistration{}); err != nil {
 		log.Fatal(err)
 	}
 	schema := `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id VARCHAR(64) UNIQUE NOT NULL, username VARCHAR(64) UNIQUE NOT NULL, password_hash TEXT NOT NULL, banned INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL)`
@@ -171,6 +173,8 @@ func main() {
 		jsonOK(w, map[string]any{"ok": true, "siteName": a.site})
 	})
 	mux.HandleFunc("/api/register", a.register)
+	mux.HandleFunc("/api/manual-registration", a.manualRegister)
+	mux.HandleFunc("/api/account/recover", a.recoverAccount)
 	mux.HandleFunc("/api/login", a.login)
 	mux.HandleFunc("/api/password", a.changePassword)
 	mux.HandleFunc("/api/legal", legalStatus)
@@ -178,6 +182,9 @@ func main() {
 	mux.HandleFunc("/privacy.html", legalPage("privacy.html"))
 	mux.HandleFunc("/api/launcher/login", a.login)
 	mux.HandleFunc("/api/admin/users", a.adminUsers)
+	mux.HandleFunc("/api/admin/users/save", a.adminSaveUser)
+	mux.HandleFunc("/api/admin/applications", a.adminApplications)
+	mux.HandleFunc("/api/admin/applications/review", a.adminReviewApplication)
 	mux.HandleFunc("/api/admin/ban", a.adminBan)
 	mux.HandleFunc("/api/admin/delete", a.adminDelete)
 	mux.HandleFunc("/api/skin", a.skin)
@@ -329,7 +336,7 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	status, pending, err := probe(in.StudentID, in.StudentPassword, in.Captcha, challenge)
+	status, pending, err := a.probeCAS(in.StudentID, in.StudentPassword, in.Captcha, challenge)
 	if err != nil {
 		log.Printf("CQUPT probe failed")
 		jsonError(w, "统一认证服务暂时不可用", 502)
@@ -793,7 +800,13 @@ func (a *app) isAdmin(username string) bool {
 	return a.db.QueryRow("SELECT student_id FROM users WHERE username=?", username).Scan(&id) == nil && id == a.adminStudent && a.adminStudent != ""
 }
 func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdmin(a.userFromToken(r)) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		jsonError(w, "请求方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	currentUsername := a.userFromToken(r)
+	if !a.isAdmin(currentUsername) {
 		jsonError(w, "管理员权限不足", 403)
 		return
 	}
@@ -810,7 +823,7 @@ func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
 		var ban int
 		var created any
 		_ = rows.Scan(&id, &sid, &name, &ban, &created)
-		out = append(out, map[string]any{"id": id, "studentId": sid, "username": name, "banned": ban != 0, "createdAt": created})
+		out = append(out, map[string]any{"id": id, "studentId": sid, "username": name, "banned": ban != 0, "createdAt": created, "isAdmin": sid == a.adminStudent, "isCurrent": name == currentUsername})
 	}
 	jsonOK(w, out)
 }
