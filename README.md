@@ -20,7 +20,7 @@ Environment variables:
 - `ADDR` (default `:8080`), `SITE_NAME`, `ADMIN_STUDENT_ID`
 - `TRUSTED_PROXY_CIDRS` (optional, comma-separated proxy IPs/CIDRs; forwarded client IPs are ignored unless the direct peer matches one of these ranges)
 
-Registration validates the numeric CQUPT unified account through the Go native CAS probe, then stores a separate site username and password. Launcher clients should POST the site credentials to `/api/launcher/login`.
+Registration validates the numeric CQUPT unified account through the Go native CAS probe, then stores a separate site username and password. Site usernames are unique without regard to ASCII letter case (`Player1` and `player1` conflict); registration checks this before contacting unified authentication. A normalized unique database index protects account creation and administrator edits, while pending manual applications use a separate normalized unique key. At startup, legacy usernames are backfilled; if existing accounts already collide case-insensitively, the server stops with a clear migration error so the accounts can be renamed deliberately rather than changing player identities automatically. Launcher clients should POST the site credentials to `/api/launcher/login`.
 
 The unified-account password is used transiently for CAS verification; it is not a field in the application's persisted user record and the service does not intentionally write it to files or logs. It remains in process/browser memory while verification is in progress, and browser-to-server transport protection depends on serving the site over HTTPS. No application can guarantee that OS swap, crash dumps, browser software, or separately configured infrastructure never persist sensitive input.
 

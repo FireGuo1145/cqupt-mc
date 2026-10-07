@@ -37,6 +37,9 @@ func newProtocolTestApp(t *testing.T) *app {
 	if err = gdb.AutoMigrate(&User{}, &Session{}, &ManualRegistration{}); err != nil {
 		t.Fatal(err)
 	}
+	if err = migrateUsernameKeys(gdb); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &app{
 		db:         db,

@@ -202,6 +202,16 @@ func (a *app) revokeCachedUserTokens(username string) {
 	}
 }
 
+func (a *app) renameCachedUserTokens(oldUsername, newUsername string) {
+	a.tokensMu.Lock()
+	defer a.tokensMu.Unlock()
+	for token, cachedUsername := range a.tokens {
+		if cachedUsername == oldUsername {
+			a.tokens[token] = newUsername
+		}
+	}
+}
+
 func (a *app) manualRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -242,13 +252,22 @@ func (a *app) manualRegister(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "本站密码至少 6 位，且两次输入必须一致", http.StatusBadRequest)
 		return
 	}
-	var existing int64
-	if err := a.gormDB.Model(&User{}).Where("student_id = ? OR username = ?", in.StudentID, in.Username).Count(&existing).Error; err != nil {
+	reserved, err := usernameReserved(a.gormDB, in.Username, 0)
+	if err != nil {
 		jsonError(w, "数据库错误", http.StatusInternalServerError)
 		return
 	}
-	if existing > 0 {
-		jsonError(w, "统一账号或本站用户名已注册", http.StatusConflict)
+	if reserved {
+		jsonError(w, "本站用户名已被使用或已有待审核申请（用户名不区分大小写）", http.StatusConflict)
+		return
+	}
+	reserved, err = studentIDReserved(a.gormDB, in.StudentID, 0)
+	if err != nil {
+		jsonError(w, "数据库错误", http.StatusInternalServerError)
+		return
+	}
+	if reserved {
+		jsonError(w, "统一账号已注册或已有待审核申请", http.StatusConflict)
 		return
 	}
 	hash, err := hashPassword(in.Password)
@@ -256,13 +275,13 @@ func (a *app) manualRegister(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "密码生成失败", http.StatusInternalServerError)
 		return
 	}
-	studentKey, usernameKey := in.StudentID, in.Username
+	studentKey, usernameKey := in.StudentID, normalizeUsername(in.Username)
 	application := ManualRegistration{
 		StudentID: in.StudentID, Username: in.Username, PasswordHash: hash, Status: "pending",
 		ActiveStudentKey: &studentKey, ActiveUsernameKey: &usernameKey, SubmittedAt: time.Now().UTC(),
 	}
 	if err = a.gormDB.Create(&application).Error; err != nil {
-		jsonError(w, "该统一账号或用户名已有待审核申请", http.StatusConflict)
+		jsonError(w, "该统一账号或本站用户名已有待审核申请（用户名不区分大小写）", http.StatusConflict)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -337,23 +356,27 @@ func (a *app) adminSaveUser(w http.ResponseWriter, r *http.Request) {
 				return errors.New("protected administrator account")
 			}
 		}
-		query := tx.Model(&User{}).Where("student_id = ? OR username = ?", in.StudentID, in.Username)
-		if in.ID != 0 {
-			query = query.Where("id <> ?", in.ID)
-		}
-		var count int64
-		if err := query.Count(&count).Error; err != nil {
+		nameReserved, err := usernameReserved(tx, in.Username, in.ID)
+		if err != nil {
 			return err
 		}
-		if count > 0 {
-			failureStatus, failureMessage = http.StatusConflict, "统一账号或本站用户名已被使用"
+		if nameReserved {
+			failureStatus, failureMessage = http.StatusConflict, "本站用户名已被使用或已有待审核申请（用户名不区分大小写）"
 			return errors.New("duplicate user identity")
+		}
+		studentReserved, err := studentIDReserved(tx, in.StudentID, in.ID)
+		if err != nil {
+			return err
+		}
+		if studentReserved {
+			failureStatus, failureMessage = http.StatusConflict, "统一账号已被注册或已有待审核申请"
+			return errors.New("duplicate student identity")
 		}
 		if in.ID == 0 {
 			saved = User{StudentID: in.StudentID, Username: in.Username, PasswordHash: passwordHash, Banned: in.Banned, CreatedAt: time.Now().UTC()}
 			return tx.Create(&saved).Error
 		}
-		updates := map[string]any{"student_id": in.StudentID, "username": in.Username, "banned": in.Banned}
+		updates := map[string]any{"student_id": in.StudentID, "username": in.Username, "username_key": normalizeUsername(in.Username), "banned": in.Banned}
 		if passwordHash != "" {
 			updates["password_hash"] = passwordHash
 		}
@@ -367,8 +390,8 @@ func (a *app) adminSaveUser(w http.ResponseWriter, r *http.Request) {
 			if err := tx.Delete(&Session{}, "username = ?", current.Username).Error; err != nil {
 				return err
 			}
-		} else if current.Username != in.Username {
-			if err := tx.Model(&Session{}).Where("username = ?", current.Username).Update("username", in.Username).Error; err != nil {
+		} else if cachedUsernameToRevoke != in.Username {
+			if err := tx.Model(&Session{}).Where("username = ?", cachedUsernameToRevoke).Update("username", in.Username).Error; err != nil {
 				return err
 			}
 		}
@@ -384,6 +407,8 @@ func (a *app) adminSaveUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ID != 0 && passwordHash != "" {
 		a.revokeCachedUserTokens(cachedUsernameToRevoke)
+	} else if in.ID != 0 && cachedUsernameToRevoke != saved.Username {
+		a.renameCachedUserTokens(cachedUsernameToRevoke, saved.Username)
 	}
 	jsonOK(w, map[string]any{"ok": true, "id": saved.ID, "username": saved.Username})
 }
@@ -453,7 +478,7 @@ func (a *app) adminReviewApplication(w http.ResponseWriter, r *http.Request) {
 			}
 			user := User{StudentID: application.StudentID, Username: application.Username, PasswordHash: application.PasswordHash, CreatedAt: now}
 			if err := tx.Create(&user).Error; err != nil {
-				failureStatus, failureMessage = http.StatusConflict, "统一账号或本站用户名已注册，申请无法通过"
+				failureStatus, failureMessage = http.StatusConflict, "统一账号或本站用户名已注册（用户名不区分大小写），申请无法通过"
 				return err
 			}
 		}

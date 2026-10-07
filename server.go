@@ -94,10 +94,11 @@ type yggLogin struct {
 	RequestUser bool   `json:"requestUser"`
 }
 type User struct {
-	ID                  uint   `gorm:"primaryKey"`
-	StudentID           string `gorm:"uniqueIndex;size:64;not null"`
-	Username            string `gorm:"uniqueIndex;size:64;not null"`
-	PasswordHash        string `gorm:"not null"`
+	ID                  uint    `gorm:"primaryKey"`
+	StudentID           string  `gorm:"uniqueIndex;size:64;not null"`
+	Username            string  `gorm:"uniqueIndex;size:64;not null"`
+	UsernameKey         *string `gorm:"size:64"`
+	PasswordHash        string  `gorm:"not null"`
 	Banned              bool
 	CreatedAt           time.Time
 	LastPasswordResetAt *time.Time `gorm:"index"`
@@ -147,6 +148,9 @@ func main() {
 	}
 	if err = gdb.AutoMigrate(&User{}, &Session{}, &ManualRegistration{}); err != nil {
 		log.Fatal(err)
+	}
+	if err = migrateUsernameKeys(gdb); err != nil {
+		log.Fatalf("case-insensitive username migration failed: %v", err)
 	}
 	schema := `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id VARCHAR(64) UNIQUE NOT NULL, username VARCHAR(64) UNIQUE NOT NULL, password_hash TEXT NOT NULL, banned INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL)`
 	if driver == "mysql" {
@@ -312,13 +316,22 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "用户名至少3位，密码至少6位", 400)
 		return
 	}
-	var exists int64
-	if a.gormDB.Model(&User{}).Where("student_id = ? OR username = ?", in.StudentID, in.Username).Count(&exists).Error != nil {
+	reserved, err := usernameReserved(a.gormDB, in.Username, 0)
+	if err != nil {
 		jsonError(w, "数据库错误", 500)
 		return
 	}
-	if exists > 0 {
-		jsonError(w, "统一账号或本站用户名已注册", 409)
+	if reserved {
+		jsonError(w, "该用户名已被使用或已有待审核申请（用户名不区分大小写）", 409)
+		return
+	}
+	reserved, err = studentIDReserved(a.gormDB, in.StudentID, 0)
+	if err != nil {
+		jsonError(w, "数据库错误", 500)
+		return
+	}
+	if reserved {
+		jsonError(w, "该统一账号已注册或已有待审核申请", 409)
 		return
 	}
 	if !a.limiter.Allow("probe:global", 5, time.Minute) {
